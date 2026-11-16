@@ -13,7 +13,8 @@ activity. It replaces the overlapping `is_streaming`, `_restarting_stream`,
 - `STREAMING`: decoder media is active.
 - `RESTARTING`: a settings or resolution change is deliberately replacing the
   stream. The phase remains active across the old decoder's termination and the
-  new connection attempt.
+  new connection attempt. `PCVRDesktopStream` also uses this phase to retire the
+  desktop connection while independent XR video, tracking and audio continue.
 - `RECONNECTING`: the native stream backend is retrying an unexpected failure.
 - `DISCONNECTING`: a user or idle timeout requested an orderly stop.
 - `FAILED`: connection setup or all reconnect attempts failed. Cleanup preserves
@@ -28,6 +29,11 @@ uses `main.is_streaming`, a read-only view of `media_active`.
 
 - `StreamManager` begins connection attempts.
 - `SettingsController` requests deliberate restarts.
+- `PCVRWorkspaceHandover` switches to the independent audio player after it is
+  ready. Its `PCVRDesktopStream` drains desktop GPU references before stopping
+  Moonlight, preserves the host/app selection and XR lease, and reconnects the
+  desktop when requested, on XR exit, or after independent audio fails. A host
+  without the negotiated audio capability keeps the existing desktop audio.
 - Native stream signals report media start, termination, reconnect scheduling,
   and reconnect exhaustion through `main.gd`.
 - `SessionLifecycle` owns the resulting phase, timeout guard, and media-active

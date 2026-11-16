@@ -118,7 +118,7 @@ pub(crate) async fn runtime_adapter(
     long_run: bool,
     cancel: tokio::sync::watch::Receiver<bool>,
 ) -> io::Result<()> {
-    runtime_adapter_with_status(root, video, tracking, hz, eye_size, eye_size, long_run, 0, "h264".into(), false, None, cancel, None, None).await
+    runtime_adapter_with_status(root, video, tracking, hz, eye_size, eye_size, long_run, 0, "h264".into(), false, None, cancel, None, None,None).await
 }
 
 pub(crate) async fn runtime_adapter_with_status(
@@ -136,6 +136,7 @@ pub(crate) async fn runtime_adapter_with_status(
     mut cancel: tokio::sync::watch::Receiver<bool>,
     progress: Option<&crate::xr_relay::RuntimeProgress>,
     bitrate_directory: Option<&crate::xr_bitrate::RuntimeDirectory>,
+    _audio:Option<u16>,
 ) -> io::Result<()> {
     if !matches!(hz, 20 | 60 | 72) || !crate::xr_control::valid_eye_size(eye_size) || !crate::xr_control::valid_eye_size(eye_height) || (long_run && !matches!(hz,60 | 72))
         || (bitrate_mbps != 0 && !(8..=160).contains(&bitrate_mbps)) || !matches!(codec.as_str(),"h264" | "h265") {

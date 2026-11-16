@@ -10,9 +10,12 @@ class Native extends RefCounted:
 	var activations := 0
 	var reject := false
 	var focused := false
+	var audio_ready := false
+	var audio_enabled := false
+	func set_meteor_audio_enabled(value: bool) -> void: audio_enabled = value
 	func set_workspace_input_focus(value: bool) -> void: focused = value
 	func get_test_status() -> Dictionary:
-		return {"state": "running", "meteor_frame_ready": ready}
+		return {"state": "running", "meteor_frame_ready": ready, "meteor_audio_ready": audio_ready}
 	func activate_meteor_projection() -> bool:
 		activations += 1
 		return not reject
@@ -78,6 +81,7 @@ class Owner extends Node3D:
 	var left_hand = null
 	var screens := [1]
 	var is_streaming := true
+	var current_host_id := -1
 	func browser_content_active() -> bool: return false
 	func _log(_text: String) -> void: pass
 
@@ -115,6 +119,39 @@ class TimingSettings extends RefCounted:
 class TimingOwner extends Owner:
 	var settings_controller := TimingSettings.new()
 
+class DesktopObserver extends RefCounted:
+	var allow_resume := true
+	var timing
+	func process(_suspend: bool, _delta: float, allow: bool) -> void:
+		allow_resume = allow
+		if allow and timing != null: assert(timing.ended == 1, "Restore desktop timing before reconnect")
+
+func _test_audio_exit_order() -> void:
+	var owner := TimingOwner.new()
+	owner.settings_controller.ready = true
+	root.add_child(owner)
+	var control := ControlState.new()
+	var handover := Harness.new(owner)
+	owner.pcvr_test.backend.ready = true
+	control.runtime_status.phase = "session_active"
+	assert(handover.arm(control))
+	handover.process(.1)
+	handover._layers_drained(handover.generation)
+	var observer := DesktopObserver.new()
+	observer.timing = owner.settings_controller
+	handover.desktop_stream = observer
+	# Cancellation also closes audio. Do not misinterpret that first as an
+	# isolated audio failure and reconnect while native XR is still draining.
+	control.state = "idle"
+	handover.process(.1)
+	assert(handover.state == Handover.State.STOPPING and not observer.allow_resume)
+	owner.pcvr_test.standby_active = false
+	handover.process(.1)
+	assert(observer.allow_resume and handover.state == Handover.State.IDLE)
+	owner.ui_panel_3d.free()
+	owner.xr_origin.free()
+	owner.free()
+
 func _initialize() -> void:
 	_run.call_deferred()
 
@@ -145,6 +182,7 @@ func _test_timing_handover() -> void:
 	owner.free()
 
 func _run() -> void:
+	_test_audio_exit_order()
 	_test_timing_handover()
 	var owner := Owner.new()
 	root.add_child(owner)
@@ -198,6 +236,12 @@ func _run() -> void:
 	owner.is_streaming = true
 	handover.process(.1)
 	assert(not owner.audio_player.stream_paused)
+	owner.pcvr_test.backend.audio_ready = true
+	handover.process(.1)
+	assert(owner.audio_player.stream_paused and owner.pcvr_test.backend.audio_enabled)
+	owner.pcvr_test.backend.audio_ready = false
+	handover.process(.1)
+	assert(not owner.audio_player.stream_paused and not owner.pcvr_test.backend.audio_enabled)
 	handover._saved.audio_paused = true
 	handover.process(.1)
 	assert(owner.audio_player.stream_paused)
@@ -316,6 +360,8 @@ func _run() -> void:
 	assert(not handover.blocks_workspace())
 	owner.pcvr_test.standby_active = false
 	handover.process(.1)
+	owner.pcvr_test.backend = null
+	handover.process(.1) # Desktop-only builds do not instantiate an XR backend.
 	owner.free()
 	print("All pcvr_workspace_handover tests passed")
 	quit()

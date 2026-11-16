@@ -4,6 +4,8 @@ use std::{path::Path,time::Duration};
 
 #[derive(Clone,Debug,PartialEq,Serialize,Deserialize)]
 pub struct Capabilities {
+    #[serde(default)]
+    pub audio_pcm:bool,
     pub backend:String,
     pub foveated_encoding:bool,
     pub live_bitrate:bool,
@@ -40,7 +42,7 @@ impl Monitor {
         self.value=Some(match reported {
             Some(json)=>parse_reported(&json).unwrap_or_else(||unavailable("Invalid encoder capability response")),
             // A DLL from before AMF support reports nothing: NVENC, as it always was.
-            None=>Capabilities {backend:"nvenc".into(),foveated_encoding:false,live_bitrate:false,codecs:vec!["h264".into(),"h265".into()],max_frame:None,error:None},
+            None=>Capabilities {audio_pcm:false,backend:"nvenc".into(),foveated_encoding:false,live_bitrate:false,codecs:vec!["h264".into(),"h265".into()],max_frame:None,error:None},
         });
         self.value.clone()
     }
@@ -72,11 +74,11 @@ impl Monitor {
 #[cfg_attr(not(windows),allow(dead_code))]
 fn parse_reported(json:&str)->Option<Capabilities> {
     #[derive(Deserialize)]
-    struct Reported {backend:String,codecs:Vec<String>,#[serde(default)] max_frame:Option<[u32;2]>}
+    struct Reported {backend:String,codecs:Vec<String>,#[serde(default)] max_frame:Option<[u32;2]>,#[serde(default)] audio_pcm:bool}
     let reported:Reported=serde_json::from_str(json).ok()?;
     if !matches!(reported.backend.as_str(),"nvenc"|"amf"|"qsv") || reported.codecs.is_empty()
         || reported.codecs.iter().any(|codec|!matches!(codec.as_str(),"h264"|"h265")) {return None;}
-    Some(Capabilities {backend:reported.backend,foveated_encoding:false,live_bitrate:false,codecs:reported.codecs,
+    Some(Capabilities {audio_pcm:reported.audio_pcm,backend:reported.backend,foveated_encoding:false,live_bitrate:false,codecs:reported.codecs,
         max_frame:reported.max_frame.filter(|[w,h]|*w>0 && *h>0),error:None})
 }
 
@@ -107,7 +109,7 @@ mod windows_dll {
     }
 }
 
-fn unavailable(error:&str)->Capabilities {Capabilities{backend:"unavailable".into(),foveated_encoding:false,live_bitrate:false,codecs:vec![],max_frame:None,error:Some(error.into())}}
+fn unavailable(error:&str)->Capabilities {Capabilities{audio_pcm:false,backend:"unavailable".into(),foveated_encoding:false,live_bitrate:false,codecs:vec![],max_frame:None,error:Some(error.into())}}
 
 #[cfg(test)]
 mod tests {

@@ -76,6 +76,7 @@ mod xr_bitrate;
 mod xr_foveation;
 mod xr_launch_intent;
 mod xr_data;
+mod xr_audio;
 #[cfg(target_os = "linux")]
 mod xr_events;
 mod xr_relay;

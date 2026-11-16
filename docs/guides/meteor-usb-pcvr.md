@@ -144,12 +144,19 @@ Get-NetTCPConnection -LocalPort 47910,47911,47912 -State Established |
     Select-Object LocalAddress,LocalPort,RemoteAddress,OwningProcess
 ```
 
-All three connections must use the USB adapter's link-local IPv6 address,
+All XR connections must use the USB adapter's link-local IPv6 address,
 with its interface scope. A session still showing the PC/Quest Wi-Fi IPv4
 addresses is still using Wi-Fi. An adapter reporting **Up** is insufficient.
 For a physical confirmation, temporarily turn off headset Wi-Fi after
 connecting and verify that the XR session keeps rendering and tracking;
 restore Wi-Fi afterwards.
+
+With the updated Windows QSV bridge and Android client, a fourth authenticated
+connection carries stereo audio on the existing video port (47911 by default).
+It needs no additional firewall rule. Hidden desktop streaming is stopped once
+this output is ready. Showing the desktop reconnects it; returning to the game
+stops it again. Hosts without this audio capability keep desktop streaming for
+sound. No ADB command or manual audio-device change is needed for this switch.
 
 At 75% Quest 2 resolution, the November 16 test negotiated 1376×1440 per eye
 at 72 Hz and submitted approximately 71 FPS over USB. Both 3,600-frame samples

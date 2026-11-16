@@ -82,6 +82,7 @@ pub(crate) async fn runtime_adapter_with_status(
     _long_run:bool,bitrate_mbps:u32,codec:String,foveated:bool,intent:Option<String>,
     cancel:tokio::sync::watch::Receiver<bool>,progress:Option<&crate::xr_relay::RuntimeProgress>,
     _bitrate_directory:Option<&crate::xr_bitrate::RuntimeDirectory>,
+    audio:Option<u16>,
 ) -> io::Result<()> {
     if foveated || !matches!(codec.as_str(),"h264"|"h265") || !matches!(hz,20|60|72) ||
         !crate::xr_control::valid_eye_size(eye_size) || !crate::xr_control::valid_eye_size(eye_height) ||
@@ -144,6 +145,11 @@ pub(crate) async fn runtime_adapter_with_status(
         dirs.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
         let path=std::env::join_paths(dirs).map_err(io::Error::other)?;
         let configure=|command:&mut Command|->io::Result<()> {
+            command.env_remove("METEOR_XR_AUDIO_PORT");
+            if let Some(port)=audio {
+                if files.ovr_bridge.is_none() {return Err(io::Error::other("Independent XR audio requires the supported bridge"));}
+                command.env("METEOR_XR_AUDIO_PORT",port.to_string());
+            }
             command.env("PATH",&path).env("XR_RUNTIME_JSON",&files.manifest)
                 .env("SIMULATED_ENABLE","1").env("XRT_COMPOSITOR_NULL","1").env("XRT_NO_STDIN","1")
                 .env("SIMULATED_LEFT","touch").env("SIMULATED_RIGHT","touch")
@@ -345,7 +351,7 @@ mod tests {
         })).unwrap()).unwrap();
         assert!(load(&root).unwrap().library_only);
         let (_stop,cancel)=tokio::sync::watch::channel(false);
-        let result=runtime_adapter_with_status(root.clone(),123,124,72,512,512,false,32,"h264".into(),false,None,cancel,None,None).await;
+        let result=runtime_adapter_with_status(root.clone(),123,124,72,512,512,false,32,"h264".into(),false,None,cancel,None,None,None).await;
         assert!(result.unwrap_err().to_string().contains("Choose a configured VR game"));
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -457,7 +463,7 @@ mod tests {
         let width=test_dimension("NIGHTFALL_WINDOWS_XR_TEST_WIDTH");
         let height=test_dimension("NIGHTFALL_WINDOWS_XR_TEST_HEIGHT");
         let bitrate=std::env::var("NIGHTFALL_WINDOWS_XR_TEST_BITRATE").map(|v|v.parse::<u32>().expect("Invalid test bitrate")).unwrap_or(32);
-        let mut runtime=tokio::spawn(runtime_adapter_with_status(root.clone(),video,tracking,72,width,height,true,bitrate,codec,false,launch_intent,cancel,None,None));
+        let mut runtime=tokio::spawn(runtime_adapter_with_status(root.clone(),video,tracking,72,width,height,true,bitrate,codec,false,launch_intent,cancel,None,None,None));
         if external && cycle==0 {
             let files=load(&root).unwrap();let mut app=Command::new(&files.application);app.args(&files.arguments).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
             external_game=Some(crate::xr_runtime_windows::Session::start(&mut app).unwrap());
@@ -507,7 +513,7 @@ mod tests {
             let (keep,cancel)=tokio::sync::watch::channel(false);
             let width=std::env::var("NIGHTFALL_WINDOWS_XR_TEST_WIDTH").unwrap().parse::<u32>().unwrap();
             let height=std::env::var("NIGHTFALL_WINDOWS_XR_TEST_HEIGHT").unwrap().parse::<u32>().unwrap();
-            let result=tokio::time::timeout(Duration::from_secs(10),runtime_adapter_with_status(root.clone(),listener.local_addr().unwrap().port(),tracking,72,if width<4096 {width+16}else{width-16},height,true,32,"h264".into(),false,Some(notice.generation),cancel,None,None)).await.unwrap();
+            let result=tokio::time::timeout(Duration::from_secs(10),runtime_adapter_with_status(root.clone(),listener.local_addr().unwrap().port(),tracking,72,if width<4096 {width+16}else{width-16},height,true,32,"h264".into(),false,Some(notice.generation),cancel,None,None,None)).await.unwrap();
             drop(keep);
             assert!(result.unwrap_err().to_string().contains("Restart SteamVR"));
             assert!(external_runtime.as_ref().unwrap().runtime_job_alive());
@@ -546,7 +552,7 @@ mod tests {
         });
         let (_stop,cancel)=tokio::sync::watch::channel(false);
         let progress=std::sync::Arc::new(std::sync::Mutex::new(crate::xr_relay::RuntimeStatus::default()));
-        runtime_adapter_with_status(root,video,tracking,20,256,256,false,0,"h264".into(),false,None,cancel,Some(&progress),None).await.unwrap();
+        runtime_adapter_with_status(root,video,tracking,20,256,256,false,0,"h264".into(),false,None,cancel,Some(&progress),None,None).await.unwrap();
         let status=progress.lock().unwrap();
         assert_eq!(status.generation.as_ref().unwrap().len(),32);
         assert!(status.event_sequence>0);

@@ -10,6 +10,7 @@
 #include <string>
 #include "pcvr_alvr_client.h"
 #include "pcvr_meteor_receiver.h"
+#include "pcvr_meteor_audio.h"
 #include "pcvr_meteor_tracking_endpoint.h"
 #include "pcvr_presentation_gate.h"
 #include <memory>
@@ -40,6 +41,8 @@ public:
 	Dictionary get_test_status() const;
 	bool set_meteor_decoder_poll_ms(int p_interval);
 	bool set_meteor_frame_buffering(bool p_enabled);
+	bool start_meteor_audio(Dictionary p_settings);
+	void set_meteor_audio_enabled(bool enabled);
 	void set_wristwatch(PackedFloat32Array p_state);
 	void set_workspace_input_focus(bool p_focused);
 	bool set_meteor_eye_size(int p_size);
@@ -100,6 +103,7 @@ private:
 	bool render_scene();
 	void release_render_resources();
 	std::unique_ptr<PCVRMeteorReceiver> meteor;
+	std::unique_ptr<PCVRMeteorAudio> meteor_audio;
 	bool meteor_mode = false, meteor_draining = false;
 	GLuint meteor_texture = 0;
 	EGLImageKHR meteor_image = EGL_NO_IMAGE_KHR;

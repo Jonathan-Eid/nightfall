@@ -97,9 +97,18 @@ The bridge uses forwarded port 47950. Trial control/video/tracking ports are
 headset identity; loopback mode uses adb reverse. Keep private keys and pairing
 credentials outside the repo.
 
-Audio uses the accompanying desktop stream. Check Windows output volume and
+On the Windows QSV bridge with an updated Android client, audio uses a separate
+authenticated XR channel. Nightfall stops the hidden desktop stream after this
+audio output is ready, reconnects it when showing the desktop or exiting VR,
+and falls back to desktop audio if the independent output fails. Other backends
+and older clients retain the accompanying desktop stream for audio.
+Independent capture currently supports mono/stereo Windows mix formats;
+multichannel playback endpoints retain the desktop audio fallback.
+Check Windows output volume and
 Quest media volume. The read-only `meteor-audio-probe` CMake target reports
-endpoint defaults and per-app mute/volume/peaks. Quest `[AUDIO-LEVEL]` reports
+endpoint defaults and per-app mute/volume/peaks. `meteor-loopback-audio-probe`
+reports three seconds of aggregate WASAPI capture statistics without saving
+audio or changing the default device. Quest `[AUDIO-LEVEL]` reports
 decoded/output signal and write errors; signal alone does not prove audibility.
 
 Record image stability, controller angle/buttons/haptics, audible game sound,

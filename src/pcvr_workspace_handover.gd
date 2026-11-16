@@ -23,9 +23,12 @@ var _menu_hidden: Array[Node3D] = []
 var _menu_collisions: Dictionary = {}
 var _menu_previous_ui := false
 var _watch
+var desktop_stream
+var _independent_audio := false
 
 func _init(owner) -> void:
 	main = owner
+	desktop_stream = preload("res://src/pcvr_desktop_stream.gd").new(main)
 
 func blocks_workspace() -> bool:
 	return owns_workspace() and ((not desktop_visible and not menu_only) or (_watch != null and _watch.interaction_blocked()))
@@ -128,6 +131,39 @@ func arm(control) -> bool:
 	return true
 
 func process(delta: float) -> void:
+	var native: Dictionary = {}
+	var runtime: Dictionary = {}
+	# Resolve lease/native termination before audio failure can request a desktop
+	# reconnect. A canceled lease must enter STOPPING before that decision.
+	if state not in [State.IDLE, State.STOPPING]:
+		if not main.pcvr_test.standby_active or not _control or _control.state != "prepared" or _control.session != _lease:
+			request_stop("XR control or receiver ended")
+		else:
+			native = main.pcvr_test.backend.get_test_status()
+			runtime = _control.runtime_status
+			var phase := str(runtime.get("phase", ""))
+			if str(native.get("state", "failed")) in ["idle", "failed", "stopping"]:
+				request_stop("XR native receiver unavailable")
+			elif phase in ["completed", "cancelled", "failed"] or (phase == "session_ended" and state != State.WAITING):
+				# Preliminary Steam/Unity sessions may end before the first frame.
+				request_stop("XR application ended")
+	var audio_ready := false
+	if owns_workspace() and state in [State.DRAINING, State.ACTIVE]:
+		audio_ready = bool(native.get("meteor_audio_ready", false)) and not bool(native.get("meteor_audio_failed", false))
+	if main.pcvr_test.backend != null and main.pcvr_test.backend.has_method("set_meteor_audio_enabled"):
+		# Switch exactly one player on. Never unmute the independent stream while
+		# the ordinary desktop audio player remains audible.
+		if audio_ready: main.audio_player.stream_paused = true
+		main.pcvr_test.backend.set_meteor_audio_enabled(audio_ready and not bool(_saved.get("audio_paused", true)))
+	_independent_audio = audio_ready
+	if state == State.STOPPING and not main.pcvr_test.standby_active:
+		if owns_workspace(): _restore_workspace()
+		_reset() # Restore desktop timing before reconnect allocates any resources.
+	# A desktop reconnect can change the display rate and allocate decoder/EGL
+	# resources. On VR exit, wait for the native receiver to finish retiring its
+	# resources before beginning that transition.
+	var allow_resume: bool = state != State.STOPPING or not main.pcvr_test.standby_active
+	desktop_stream.process(state == State.ACTIVE and audio_ready and not desktop_visible, delta, allow_resume)
 	if state == State.IDLE: return
 	_elapsed += delta
 	if state == State.ACTIVE:
@@ -135,25 +171,6 @@ func process(delta: float) -> void:
 		_watch.process(delta, self)
 	if owns_workspace(): _enforce_hidden()
 	if state == State.STOPPING:
-		if not main.pcvr_test.standby_active:
-			if owns_workspace(): _restore_workspace()
-			_reset()
-		return
-	if not main.pcvr_test.standby_active or not _control or _control.state != "prepared" or _control.session != _lease:
-		request_stop("XR control or receiver ended")
-		return
-	var native: Dictionary = main.pcvr_test.backend.get_test_status()
-	if str(native.get("state", "failed")) in ["idle", "failed", "stopping"]:
-		request_stop("XR native receiver unavailable")
-		return
-	var runtime: Dictionary = _control.runtime_status
-	# Steam/Proton can begin and destroy probe sessions before the game starts.
-	# Before the first video-backed handover, a session ending is not proof that
-	# the owned application exited. Keep the desktop and the bounded startup
-	# timer alive; supervisor completion/failure remains terminal in all states.
-	var phase := str(runtime.get("phase", ""))
-	if phase in ["completed", "cancelled", "failed"] or (phase == "session_ended" and state != State.WAITING):
-		request_stop("XR application ended")
 		return
 	if state == State.DRAINING and _elapsed - _drain_started >= 3.0:
 		request_stop("Desktop layer retirement timed out")
@@ -221,10 +238,7 @@ func _enforce_hidden() -> void:
 	# lifecycle callbacks can still update child visibility/content while hidden.
 	main.visible = desktop_visible or menu_only
 	_set_screen_rendering(desktop_visible or menu_only)
-	# The desktop connection remains alive while its video is hidden. Until XR
-	# has its own audio transport, retain that host's captured game/system audio.
-	# Never resume a previously paused player or replay stale audio after disconnect.
-	main.audio_player.stream_paused = not main.is_streaming or bool(_saved.get("audio_paused", true))
+	main.audio_player.stream_paused = _independent_audio or not main.is_streaming or bool(_saved.get("audio_paused", true))
 	main.meteor_microphone.set_paused(true)
 	main.native_xr_renderer.set_presentation_suspended(not desktop_visible)
 	var interface = _xr_interface()
@@ -270,7 +284,7 @@ func _layers_drained(token: int) -> void:
 		request_stop("XR activation rejected")
 		return
 	state = State.ACTIVE
-	main._log("[XR-HANDOVER] XR projection activated; Sunshine session/context preserved")
+	main._log("[XR-HANDOVER] XR projection activated")
 
 func _restore_workspace() -> void:
 	# Native idle is the prerequisite. Never force welcome, reconnect Sunshine,
@@ -287,7 +301,7 @@ func _restore_workspace() -> void:
 	main.get_viewport().transparent_bg = saved.transparent
 	main.visible = saved.visible
 	_set_screen_rendering(true)
-	main.audio_player.stream_paused = saved.audio_paused
+	main.audio_player.stream_paused = saved.audio_paused or not main.is_streaming
 	main.meteor_microphone.set_paused(saved.mic_paused or main.pcvr_test.application_paused)
 	if main.has_method("reset_primary_shortcuts"): main.reset_primary_shortcuts()
 	main._log("[XR-HANDOVER] Native XR drained; previous workspace restored")

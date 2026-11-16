@@ -98,6 +98,8 @@ pub struct Ports {
     pub video: u16,
     pub tracking: u16,
     pub framing: u8,
+    #[serde(default)]
+    pub audio:bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -128,6 +130,7 @@ pub struct Relay {
     pub ports: Ports,
     pub local_video: u16,
     pub local_tracking: u16,
+    pub local_audio:Option<u16>,
     failed: Arc<AtomicBool>,
     stop: watch::Sender<bool>,
     tasks: Vec<JoinHandle<()>>,
@@ -144,6 +147,9 @@ impl Relay {
         Self::prepare_on_address(SocketAddr::new(bind, 0), credentials, fixed).await
     }
     pub async fn prepare_on_address(bind: SocketAddr, credentials: Credentials, fixed: Option<(u16, u16)>) -> io::Result<Self> {
+        Self::prepare_on_address_with_audio(bind,credentials,fixed,false).await
+    }
+    pub async fn prepare_on_address_with_audio(bind: SocketAddr, credentials: Credentials, fixed: Option<(u16, u16)>, audio:bool) -> io::Result<Self> {
         if fixed.is_some_and(|(video, tracking)| video == 0 || tracking == 0 || video == tracking) {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "XR data ports must be distinct and nonzero"));
         }
@@ -152,10 +158,13 @@ impl Relay {
         let tracking = TcpListener::bind(tracking_address).await?;
         let local_video = TcpListener::bind("127.0.0.1:0").await?;
         let local_tracking = TcpListener::bind("127.0.0.1:0").await?;
+        let mut local_audio=if audio {Some(TcpListener::bind("127.0.0.1:0").await?)} else {None};
+        let local_audio_port=local_audio.as_ref().map(|listener|listener.local_addr().map(|address|address.port())).transpose()?;
         let ports = Ports {
             video: video.local_addr()?.port(),
             tracking: tracking.local_addr()?.port(),
             framing: 1,
+            audio,
         };
         let local_video_port = local_video.local_addr()?.port();
         let local_tracking_port = local_tracking.local_addr()?.port();
@@ -172,9 +181,13 @@ impl Relay {
             let signal = stop.clone();
             let failure = failed.clone();
             let ready = attached.clone();
+            let audio_listener=if kind==Kind::AttachVideo {local_audio.take()} else {None};
             tasks.push(tokio::spawn(async move {
                 tokio::select! {
-                    result=lane(listener,local,credentials,kind,ready)=> {
+                    result=async {
+                        if kind==Kind::AttachVideo {video_lanes(listener,local,audio_listener,credentials,ready).await}
+                        else {lane(listener,local,credentials,kind,ready).await}
+                    }=> {
                         if let Err(error)=result {failure.store(true,Ordering::Release);eprintln!("Meteor XR relay {kind:?} stopped: {error}");signal.send_replace(true);}
                     },
                     _=cancel.changed()=>{},
@@ -185,6 +198,7 @@ impl Relay {
             ports,
             local_video: local_video_port,
             local_tracking: local_tracking_port,
+            local_audio:local_audio_port,
             failed,
             stop,
             tasks,
@@ -227,11 +241,12 @@ impl Relay {
         let signal = self.stop.clone();
         let failure = self.failed.clone();
         let (video, tracking) = (self.local_video, self.local_tracking);
+        let audio=self.local_audio;
         // Intentionally not aborted by Relay::drop: cancellation is delivered
         // through watch, allowing bounded graceful app teardown before kill.
         let task = tokio::spawn(async move {
             let deadline = tokio::time::Instant::now() + WAIT;
-            while ready.load(Ordering::Acquire) != 2 {
+            while ready.load(Ordering::Acquire) != 2+usize::from(audio.is_some()) {
                 if *cancel.borrow() {
                     progress.lock().unwrap().phase = RuntimePhase::Cancelled;
                     return;
@@ -249,7 +264,7 @@ impl Relay {
             }
             progress.lock().unwrap().phase = RuntimePhase::Starting;
             let cancelled = cancel.clone();
-            let result = crate::xr_session::runtime_adapter_with_status(root, video, tracking, hz, eye_size, eye_height, long_run, bitrate_mbps, codec, foveated_encoding, launch_intent, cancel, Some(&progress), Some(&bitrate_directory)).await;
+            let result = crate::xr_session::runtime_adapter_with_status(root, video, tracking, hz, eye_size, eye_height, long_run, bitrate_mbps, codec, foveated_encoding, launch_intent, cancel, Some(&progress), Some(&bitrate_directory),audio).await;
             // The adapter has returned and its owned child has been reaped.
             {
                 let mut status = progress.lock().unwrap();
@@ -333,8 +348,11 @@ async fn lane(
         return Err(invalid("XR endpoint session mismatch"));
     }
     ready.fetch_add(1, Ordering::Release);
+    connected_lane(remote,local,credentials,kind,challenge).await
+}
+async fn connected_lane(mut remote:TcpStream,local:TcpListener,credentials:Credentials,kind:Kind,challenge:[u8;32])->io::Result<()> {
     // No trusted-local producer is admitted until remote key possession is proved.
-    let mut local = if kind == Kind::AttachVideo {
+    let mut local = if matches!(kind,Kind::AttachVideo|Kind::AttachAudio) {
         let (stream, _) = tokio::time::timeout(Duration::from_secs(45), local.accept()).await
             .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "XR armed video attach timeout"))??;
         stream.set_nodelay(true)?;
@@ -342,8 +360,62 @@ async fn lane(
     } else { accept(local).await? };
     if kind == Kind::AttachVideo {
         video(&mut remote, &mut local, &credentials, challenge).await
+    } else if kind==Kind::AttachAudio {
+        audio(&mut remote,&mut local,&credentials,challenge).await
     } else {
         tracking(&mut remote, &mut local, &credentials, challenge).await
+    }
+}
+// Audio shares the existing video listening port. Each socket proves possession
+// independently with a fresh challenge and a different key-derivation label.
+// No additional LAN listener or firewall allowance is introduced.
+async fn video_lanes(listener:TcpListener,local_video:TcpListener,local_audio:Option<TcpListener>,credentials:Credentials,ready:Arc<AtomicUsize>)->io::Result<()> {
+    let Some(audio_listener)=local_audio else {return lane(listener,local_video,credentials,Kind::AttachVideo,ready).await;};
+    let mut video=Some(local_video);let mut audio=Some(audio_listener);
+    let mut workers=tokio::task::JoinSet::new();
+    for _ in 0..2 {
+        let (mut remote,_)=tokio::time::timeout(WAIT,listener.accept()).await
+            .map_err(|_|io::Error::new(io::ErrorKind::TimedOut,"XR video/audio attach timeout"))??;
+        remote.set_nodelay(true)?;
+        let mut challenge=[0;32];SystemRandom::new().fill(&mut challenge).map_err(|_|invalid("randomness unavailable"))?;
+        bounded(remote.write_all(&challenge)).await?;
+        let mut header=[0;HEADER];bounded(remote.read_exact(&mut header)).await?;
+        let kind=match header[5] {5=>Kind::AttachVideo,8=>Kind::AttachAudio,_=>return Err(invalid("XR video/audio attach kind"))};
+        let mut cipher=credentials.channel(kind,challenge)?;
+        let size=cipher.payload_length(&header)?;let mut body=vec![0;size];
+        bounded(remote.read_exact(&mut body)).await?;
+        let proof=cipher.open(&header,body)?;
+        if proof[8..24]!=credentials.session {return Err(invalid("XR endpoint session mismatch"));}
+        let local=if kind==Kind::AttachVideo {video.take()} else {audio.take()}.ok_or_else(||invalid("duplicate XR data lane"))?;
+        ready.fetch_add(1,Ordering::Release);
+        let credentials=credentials.clone();
+        workers.spawn(async move {(kind,connected_lane(remote,local,credentials,kind,challenge).await)});
+    }
+    while let Some(result)=workers.join_next().await {
+        let (kind,result)=result.map_err(io::Error::other)?;
+        if kind==Kind::AttachAudio {
+            // The headset restores desktop audio if the dedicated PCM lane
+            // fails. Losing optional audio must not terminate the VR game.
+            if let Err(error)=result {eprintln!("Meteor XR audio lane stopped: {error}");}
+        } else {result?;}
+    }
+    Ok(())
+}
+async fn audio(remote:&mut TcpStream,local:&mut TcpStream,credentials:&Credentials,binding:[u8;32])->io::Result<()> {
+    let mut tx=credentials.channel(Kind::Audio,binding)?;
+    let mut rx=credentials.channel(Kind::AudioFeedback,binding)?;
+    let mut validator=crate::xr_audio::Reader::default();
+    loop {
+        let mut header=[0;crate::xr_audio::HEADER];bounded(local.read_exact(&mut header)).await?;
+        let info=crate::xr_audio::Header::decode(&header)?;
+        let mut packet=header.to_vec();packet.resize(header.len()+info.payload_len(),0);
+        bounded(local.read_exact(&mut packet[header.len()..])).await?;
+        validator.accept(&packet)?;
+        write(remote,&mut tx,&packet).await?;
+        let feedback=read(remote,&mut rx).await?;
+        let mut expected=b"NFAC".to_vec();expected.extend(info.sequence.to_le_bytes());
+        if feedback!=expected {return Err(invalid("XR audio acknowledgment mismatch"));}
+        bounded(local.write_all(&feedback)).await?;
     }
 }
 async fn video(
@@ -522,6 +594,47 @@ mod tests {
             client_nonce: [4; 32],
             session: [5; 16],
         }
+    }
+    async fn attach_audio_or_video(port:u16,kind:Kind)->(TcpStream,[u8;32]) {
+        let mut remote=TcpStream::connect(("127.0.0.1",port)).await.unwrap();
+        let mut challenge=[0;32];bounded(remote.read_exact(&mut challenge)).await.unwrap();
+        let mut proof=vec![0;32];proof[..4].copy_from_slice(b"NFXB");
+        proof[4]=if kind==Kind::AttachAudio {3} else {1};
+        proof[8..24].copy_from_slice(&credentials().session);
+        write(&mut remote,&mut credentials().channel(kind,challenge).unwrap(),&proof).await.unwrap();
+        (remote,challenge)
+    }
+    #[tokio::test]
+    async fn audio_shares_video_port_and_its_failure_does_not_stop_video() {
+        let relay=Relay::prepare_on_address_with_audio("127.0.0.1:0".parse().unwrap(),credentials(),None,true).await.unwrap();
+        assert!(relay.ports.audio);
+        let (mut remote_audio,audio_binding)=attach_audio_or_video(relay.ports.video,Kind::AttachAudio).await;
+        let (mut remote_video,video_binding)=attach_audio_or_video(relay.ports.video,Kind::AttachVideo).await;
+        let mut publisher=TcpStream::connect(("127.0.0.1",relay.local_audio.unwrap())).await.unwrap();
+        let mut config=vec![0u8;32];config[..4].copy_from_slice(b"NFAP");config[4]=1;config[6]=32;
+        config[8..12].copy_from_slice(&48000u32.to_le_bytes());config[12]=2;config[14]=1;
+        bounded(publisher.write_all(&config)).await.unwrap();
+        let received=read(&mut remote_audio,&mut credentials().channel(Kind::Audio,audio_binding).unwrap()).await.unwrap();
+        assert_eq!(received,config);
+        let mut feedback=b"NFAC".to_vec();feedback.extend(0u64.to_le_bytes());
+        write(&mut remote_audio,&mut credentials().channel(Kind::AudioFeedback,audio_binding).unwrap(),&feedback).await.unwrap();
+        let mut ack=[0;12];bounded(publisher.read_exact(&mut ack)).await.unwrap();assert_eq!(ack.as_slice(),feedback);
+        drop(remote_audio);drop(publisher);
+        let mut video_publisher=TcpStream::connect(("127.0.0.1",relay.local_video)).await.unwrap();
+        bounded(video_publisher.write_all(&frame(0,false))).await.unwrap();
+        assert_eq!(read(&mut remote_video,&mut credentials().channel(Kind::Video,video_binding).unwrap()).await.unwrap(),frame(0,false));
+        assert!(!relay.failed());
+        drop(relay);
+        let mut byte=[0];assert_eq!(bounded(remote_video.read(&mut byte)).await.unwrap(),0);
+    }
+    #[tokio::test]
+    async fn duplicate_audio_proof_cancels_lease() {
+        let relay=Relay::prepare_on_address_with_audio("127.0.0.1:0".parse().unwrap(),credentials(),None,true).await.unwrap();
+        let (_first,_)=attach_audio_or_video(relay.ports.video,Kind::AttachAudio).await;
+        let (_second,_)=attach_audio_or_video(relay.ports.video,Kind::AttachAudio).await;
+        tokio::time::timeout(Duration::from_secs(1),async {
+            while !relay.failed() {tokio::task::yield_now().await;}
+        }).await.unwrap();
     }
     fn frame(sequence: u64, end: bool) -> Vec<u8> {
         let payload = [0, 0, 1, 0x67, 1, 0, 0, 1, 0x68, 1, 0, 0, 1, 0x65, 1];

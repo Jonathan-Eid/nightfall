@@ -274,3 +274,44 @@ This variation is why the faster short sample is not a stable-rate claim.
 ALVR comparison was stopped at the user's
 request and its temporary settings/driver registration were restored.
 
+### Independent audio and desktop shutdown, November 16
+
+The Windows QSV bridge now advertises optional `audio_pcm`. Android explicitly
+negotiates it before accepting a session. The owned VR application's bridge
+captures the default Windows render endpoint using shared-mode WASAPI, converts
+its mix format to stereo PCM16 and publishes packets of at most 10 ms. Meteor
+authenticates and encrypts a separate audio socket using the existing video
+listening port. Audio, attach and acknowledgment messages have distinct channel
+keys, a fresh connection challenge, bounded lengths and ordered sequences.
+There is no new firewall port, virtual audio driver or default-device change.
+
+AAudio playback uses a bounded queue, trims queued latency beyond 40 ms and
+outputs silence on underflow. Its callback performs no blocking I/O or memory
+allocation. The player stays muted until handover has paused desktop audio.
+Once ready, `PCVRDesktopStream` drains decoder GPU references and stops the
+Moonlight connection using the existing restart lifecycle. It retains the XR
+lease and host/app selection, reconnects when showing desktop or exiting VR,
+and requests the existing desktop/audio path again if independent audio fails.
+Unupdated clients and hosts without the capability retain desktop streaming.
+
+Physical Quest 2/Arc 140V tests verified independent 48 kHz stereo playback:
+the user heard both known test tones while desktop media was disconnected.
+Showing desktop reconnected it; hiding it disconnected it again with the same
+VR session generation and ongoing audio. The session continued beyond six
+minutes. Pairings were preserved. The installed APK remains a diagnostic repack
+with a source-built XR extension, not a full Android build.
+
+At unchanged 2752×1440, H.264/32 Mbps/72 Hz, an initial 86.1-second sample
+averaged 57.0 projection copies/sec. Later in that same session, sequential
+desktop-visible and desktop-stopped samples measured 71.7 copies/sec over
+19.5 seconds and 71.5 over 29.5 seconds. Desktop shutdown is functional; these
+measurements show no FPS gain in this workload and do not establish a sustained
+rate or scanout/motion-to-photon latency. 90 Hz remains unimplemented.
+
+Validation: 195 Rust tests passed (20 environment-specific tests ignored),
+including optional audio negotiation, duplicate-lane rejection, ordered PCM
+validation, audio forwarding and continued video after audio disconnect.
+Portable PCM/ring tests passed with MSVC; workspace handover and desktop
+reconnect state tests passed in Godot. Android XR and Windows bridge builds
+passed. The read-only WASAPI probe captured 48 kHz stereo without recording it.
+

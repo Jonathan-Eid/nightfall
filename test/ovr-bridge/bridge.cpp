@@ -10,6 +10,7 @@
 #include "../meteor_qsv_encoder.h"
 #include "../meteor_encoder_bitrate.h"
 #include "../steamvr-driver/transport.h"
+#include "../meteor_windows_audio_transport.h"
 
 namespace {
 const char *env(const char *key){auto *s=std::getenv(key);return s?s:"";}
@@ -35,6 +36,7 @@ struct Session {
     Microsoft::WRL::ComPtr<ID3D11Device> producer;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> input;
     std::unique_ptr<MeteorQsvEncoder> encoder;
+    MeteorWindowsAudioTransport audio;
     std::mutex mutex;
     bool delivered=false;
     template<class T> void symbol(T& f,const char *name){f=reinterpret_cast<T>(GetProcAddress(tracking,name));if(!f)throw std::runtime_error(std::string("Missing tracking export ")+name);}
@@ -64,6 +66,7 @@ struct Session {
         if(!client || !optics(client,config.optics))throw std::runtime_error("Meteor tracking/optics are not ready");
     }
     ~Session(){
+        audio.stop();
         encoder.reset();
         const bool ended=!delivered || meteor_steamvr_finish()!=0;
         if(client && stop)stop(client);if(tracking)FreeLibrary(tracking);
@@ -131,6 +134,9 @@ extern "C" __declspec(dllexport) int nightfall_ovr_submit_v1(void *raw,void *dev
             uint32_t bitrate=0;if(!meteor_encoder_bitrate(env("METEOR_XR_BITRATE_MBPS"),32000000,&bitrate))throw std::runtime_error("Invalid OVR bitrate");
             s.encoder=std::make_unique<MeteorQsvEncoder>();s.encoder->attach(d3d,s.input.Get(),desc.Width,desc.Height);
             if(!s.encoder->start(!std::strcmp(codec,"h265"),s.config.refresh_hz,bitrate,true))throw std::runtime_error(s.encoder->error);
+            if(*env("METEOR_XR_AUDIO_PORT") && !s.audio.start(uint16_t(number("METEOR_XR_AUDIO_PORT",0,1,65535)))) {
+                std::fprintf(stderr,"METEOR_OVR_AUDIO startup_failed=1; headset will retain desktop fallback\n");std::fflush(stderr);
+            }
         }
         if(s.producer.Get()!=d3d)throw std::runtime_error("OVR producer device changed");
         const auto encode_start=std::chrono::steady_clock::now();
@@ -171,7 +177,7 @@ extern "C" __declspec(dllexport) void nightfall_ovr_close_v1(void *raw){
 extern "C" __declspec(dllexport) uint32_t meteor_encoder_capabilities_v1(char *json,uint32_t size){
     auto device=meteor_d3d11_on(nullptr,0x8086);ArcQsvCapabilities caps{};
     if(!device || arc_qsv_capabilities(device.Get(),&caps)!=0 || !json)return 0;
-    const int n=std::snprintf(json,size,"{\"backend\":\"qsv\",\"codecs\":[%s%s%s],\"max_frame\":[%u,%u]}",
+    const int n=std::snprintf(json,size,"{\"backend\":\"qsv\",\"audio_pcm\":true,\"codecs\":[%s%s%s],\"max_frame\":[%u,%u]}",
         caps.codecs&1?"\"h264\"":"",caps.codecs==3?",":"",caps.codecs&2?"\"h265\"":"",caps.max_width,caps.max_height);
     return n>0 && uint32_t(n)<size?uint32_t(n):0;
 }

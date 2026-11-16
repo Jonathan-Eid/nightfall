@@ -2,6 +2,7 @@
 #include "fast_xr_renderer.h"
 #include "pcvr_view_validation.h"
 #include <godot_cpp/core/class_db.hpp>
+#include <godot_cpp/variant/packed_byte_array.hpp>
 #include <algorithm>
 
 #ifdef __ANDROID__
@@ -24,6 +25,8 @@ void NightfallXrProjectionTest::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_test_status"), &NightfallXrProjectionTest::get_test_status);
 	ClassDB::bind_method(D_METHOD("set_meteor_decoder_poll_ms", "interval"), &NightfallXrProjectionTest::set_meteor_decoder_poll_ms);
 	ClassDB::bind_method(D_METHOD("set_meteor_frame_buffering", "enabled"), &NightfallXrProjectionTest::set_meteor_frame_buffering);
+	ClassDB::bind_method(D_METHOD("start_meteor_audio", "settings"), &NightfallXrProjectionTest::start_meteor_audio);
+	ClassDB::bind_method(D_METHOD("set_meteor_audio_enabled", "enabled"), &NightfallXrProjectionTest::set_meteor_audio_enabled);
 	ClassDB::bind_method(D_METHOD("set_wristwatch", "state"), &NightfallXrProjectionTest::set_wristwatch);
 	ClassDB::bind_method(D_METHOD("set_workspace_input_focus", "focused"), &NightfallXrProjectionTest::set_workspace_input_focus);
 	ClassDB::bind_method(D_METHOD("get_wristwatch_tracking"), &NightfallXrProjectionTest::get_wristwatch_tracking);
@@ -68,6 +71,9 @@ void NightfallXrProjectionTest::_on_instance_created(uint64_t instance_handle) {
 }
 
 void NightfallXrProjectionTest::_on_instance_destroyed() {
+#ifdef __ANDROID__
+	if(meteor_audio)meteor_audio->request_stop();
+#endif
 	NightfallXrRenderer::_on_instance_destroyed();
 	pcvr_layer_settings_supported=false;
 #ifdef __ANDROID__
@@ -164,6 +170,8 @@ bool NightfallXrProjectionTest::activate_meteor_projection() {
 bool NightfallXrProjectionTest::start_meteor_mode(bool present_immediately) {
 #ifdef __ANDROID__
 	if (state.load() != IDLE) { PCVR_LOG("Meteor start rejected: projection test not idle"); return false; }
+	if (meteor_audio && !meteor_audio->idle()) return false;
+	meteor_audio.reset();
 	if (!clock_extension) { PCVR_LOG("Meteor start rejected: XR_KHR_convert_timespec_time was not enabled at instance creation"); return false; }
 	meteor_presentation.begin(present_immediately);
 	if (!tracking) tracking = std::make_unique<MeteorTrackingEndpoint>();
@@ -181,8 +189,41 @@ bool NightfallXrProjectionTest::start_meteor_mode(bool present_immediately) {
 }
 
 void NightfallXrProjectionTest::stop_test() {
+#ifdef __ANDROID__
+	if(meteor_audio)meteor_audio->request_stop();
+#endif
 	int current = state.load();
 	while (current != IDLE && current != STOPPING && !state.compare_exchange_weak(current, STOPPING)) {}
+}
+
+void NightfallXrProjectionTest::set_meteor_audio_enabled(bool enabled) {
+#ifdef __ANDROID__
+	if(meteor_audio)meteor_audio->enabled=enabled && meteor_audio->ready.load() && !meteor_audio->failed.load();
+#else
+	(void)enabled;
+#endif
+}
+
+bool NightfallXrProjectionTest::start_meteor_audio(Dictionary settings) {
+#ifdef __ANDROID__
+	if(!meteor_mode || (state.load()!=STARTING && state.load()!=RUNNING) || meteor_audio)return false;
+	PCVRMeteorAudio::Config config;
+	config.address=String(settings.get("address","")).utf8().get_data();
+	const int64_t port=settings.get("video",0);
+	if(port<1 || port>65535)return false;
+	config.port=uint16_t(port);
+	auto copy=[&](const char *name,auto &target) {
+		Variant value=settings.get(name,Variant());if(value.get_type()!=Variant::PACKED_BYTE_ARRAY)return false;
+		PackedByteArray bytes=value;if(size_t(bytes.size())!=target.size())return false;
+		std::copy_n(bytes.ptr(),target.size(),target.begin());return true;
+	};
+	if(!copy("host",config.host) || !copy("identity",config.identity) || !copy("server_nonce",config.server_nonce) ||
+	   !copy("client_nonce",config.client_nonce) || !copy("session",config.session))return false;
+	meteor_audio=std::make_unique<PCVRMeteorAudio>();
+	return meteor_audio->start(config);
+#else
+	return false;
+#endif
 }
 
 bool NightfallXrProjectionTest::set_meteor_decoder_poll_ms(int p_interval) {
@@ -220,6 +261,18 @@ Dictionary NightfallXrProjectionTest::get_test_status() const {
 	result["meteor_standby"] = meteor_mode && !meteor_presentation.input_enabled();
 	result["meteor_frame_ready"] = meteor_mode && meteor_presentation.is_ready();
 	result["meteor_projection_enabled"] = meteor_mode && meteor_presentation.present();
+	result["meteor_audio_configured"]=bool(meteor_audio);
+	result["meteor_audio_ready"]=meteor_audio && meteor_audio->ready.load() && !meteor_audio->failed.load();
+	result["meteor_audio_failed"]=meteor_audio && meteor_audio->failed.load();
+	result["meteor_audio_enabled"]=meteor_audio && meteor_audio->enabled.load();
+	if(meteor_audio) {
+		result["meteor_audio_status"]=String(meteor_audio->message().c_str());
+		result["meteor_audio_rate"]=int64_t(meteor_audio->rate.load());
+		result["meteor_audio_received_frames"]=int64_t(meteor_audio->received_frames.load());
+		result["meteor_audio_played_frames"]=int64_t(meteor_audio->played_frames.load());
+		result["meteor_audio_queued_frames"]=int64_t(meteor_audio->ring.queued());
+		result["meteor_audio_trimmed_frames"]=int64_t(meteor_audio->ring.dropped.load());
+	}
 	if (meteor) {
 		Dictionary timings;
 		auto duration=[&](const char *name,const PCVRLatencyHistogram &hist) {
@@ -1037,7 +1090,7 @@ int32_t NightfallXrProjectionTest::_get_composition_layer_count() {
 		if (!swapchain) {
 			if (meteor_mode) {
 				if (!meteor_draining) { meteor->stop_after_gpu_drain(); tracking->request_stop(); meteor_draining = true; }
-				if (!meteor->idle() || !tracking->idle()) return 0;
+				if (!meteor->idle() || !tracking->idle() || (meteor_audio && !meteor_audio->idle())) return 0;
 				meteor_mode = false;
 				meteor_presentation.reset();
 			}

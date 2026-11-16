@@ -30,6 +30,7 @@ fn invalid(message: &str) -> io::Error {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
     Authenticate {},
+    ConfigureAudio { enabled: bool },
     HostBackground { color: String },
     Library {action:String, #[serde(default)] key:String, #[serde(default)] offset:u32},
     Offer { width: u32, height: u32, hz: u32 },
@@ -71,6 +72,7 @@ pub struct Reply {
 }
 
 struct Session {
+    audio:bool,
     id: String,
     raw_id: [u8; 16],
     accepted: bool,
@@ -86,6 +88,7 @@ struct Session {
 }
 #[derive(Default)]
 struct Negotiation {
+    audio:bool,
     encoder:Option<crate::xr_encoder::Capabilities>,
     session: Option<Session>,
     bitrate_mbps: u32,
@@ -136,6 +139,13 @@ impl Negotiation {
             Request::Status {} => {}
             Request::SetBitrate {..} | Request::SetFoveation {..} => return Ok(self.reply(Some("runtime_not_active"))),
             Request::PendingLaunch {} | Request::ClaimLaunch {..} => return Ok(self.reply(Some("launch_watch_unavailable"))),
+            Request::ConfigureAudio {enabled} => {
+                if self.session.is_some() { return Ok(self.reply(Some("busy"))); }
+                if enabled && !self.encoder.as_ref().is_some_and(|caps|caps.audio_pcm) {
+                    return Ok(self.reply(Some("unsupported_audio")));
+                }
+                self.audio=enabled;
+            }
             Request::ConfigureVideo { bitrate_mbps, codec, foveated_encoding } => {
                 if self.session.is_some() { return Ok(self.reply(Some("busy"))); }
                 if bitrate_mbps != 0 && !(8..=160).contains(&bitrate_mbps) {
@@ -163,6 +173,7 @@ impl Negotiation {
                     .fill(&mut id)
                     .map_err(|_| invalid("randomness unavailable"))?;
                 self.session = Some(Session {
+                    audio:self.audio,
                     id: id.iter().map(|b| format!("{b:02x}")).collect(),
                     raw_id: id,
                     accepted: false,
@@ -485,7 +496,7 @@ async fn connection_supervised(
                 .as_ref()
                 .ok_or_else(|| invalid("no accepted lease"))?;
             relay = Some(
-                crate::xr_relay::Relay::prepare_on_address(
+                crate::xr_relay::Relay::prepare_on_address_with_audio(
                     bind,
                     crate::xr_relay::Credentials {
                         host: key.clone(),
@@ -495,6 +506,7 @@ async fn connection_supervised(
                         session: session.raw_id,
                     },
                     relay_ports,
+                    session.audio,
                 )
                 .await?,
             );
@@ -926,6 +938,22 @@ mod tests {
     }
 
     #[test]
+    fn independent_audio_is_opt_in_capability_and_frozen_with_session() {
+        let mut state=Negotiation::default();
+        assert_eq!(state.apply(Request::ConfigureAudio{enabled:true}).unwrap().reason.as_deref(),Some("unsupported_audio"));
+        assert!(!state.audio);
+        state.encoder=Some(crate::xr_encoder::Capabilities {
+            backend:"qsv".into(), codecs:vec!["h264".into()], foveated_encoding:false,
+            audio_pcm:true, live_bitrate:true, max_frame:None, error:None,
+        });
+        assert!(state.apply(Request::ConfigureAudio{enabled:true}).unwrap().reason.is_none());
+        state.apply(Request::OfferLong{width:1024,height:1024,hz:72}).unwrap();
+        assert!(state.session.as_ref().unwrap().audio);
+        assert_eq!(state.apply(Request::ConfigureAudio{enabled:false}).unwrap().reason.as_deref(),Some("busy"));
+        assert!(state.session.as_ref().unwrap().audio);
+    }
+
+    #[test]
     fn negotiated_high_resolution_is_retained() {
         let mut state = Negotiation::default();
         assert_eq!(state.apply(Request::Offer {width:1024,height:1024,hz:60}).unwrap().state,"awaiting_acceptance");
@@ -943,7 +971,7 @@ mod tests {
     #[test]
     fn unsupported_encoder_masks_foveation_without_rejecting_stream() {
         let mut state=Negotiation::default();
-        state.encoder=Some(crate::xr_encoder::Capabilities{backend:"vaapi".into(),foveated_encoding:false,live_bitrate:false,codecs:vec!["h264".into(),"h265".into()],max_frame:None,error:None});
+        state.encoder=Some(crate::xr_encoder::Capabilities{audio_pcm:false,backend:"vaapi".into(),foveated_encoding:false,live_bitrate:false,codecs:vec!["h264".into(),"h265".into()],max_frame:None,error:None});
         let reply=state.apply(Request::ConfigureVideo{bitrate_mbps:32,codec:Some("h264".into()),foveated_encoding:true}).unwrap();
         assert!(reply.reason.is_none());assert!(!reply.encoder.unwrap().foveated_encoding);
         state.apply(Request::Offer{width:512,height:512,hz:20}).unwrap();
@@ -952,7 +980,7 @@ mod tests {
 
     #[test]
     fn offers_must_fit_the_encoders_largest_frame() {
-        let caps=|max_frame|crate::xr_encoder::Capabilities{backend:"vaapi".into(),foveated_encoding:false,live_bitrate:false,codecs:vec!["h265".into()],max_frame,error:None};
+        let caps=|max_frame|crate::xr_encoder::Capabilities{audio_pcm:false,backend:"vaapi".into(),foveated_encoding:false,live_bitrate:false,codecs:vec!["h265".into()],max_frame,error:None};
         // AMD Polaris: 4096 per side, so two 2064-wide eyes (4128) don't fit.
         let mut state=Negotiation::default();
         state.encoder=Some(caps(Some([4096,4096])));

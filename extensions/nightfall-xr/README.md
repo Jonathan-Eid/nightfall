@@ -71,6 +71,26 @@ already covers only the primary.
 A secondary swapchain is kept while its screen keeps its pixel size. Otherwise
 it stops being submitted and is destroyed `RESIZE_DRAIN_FRAME_COUNT` frames
 later, under the renderer's own EGL context.
+## Independent PCVR audio (Android)
+
+The Windows QSV bridge can negotiate bounded PCM16 stereo packets using the
+existing authenticated XR video listening port. The XR extension plays them
+through AAudio using a bounded queue and a callback with no locks, allocations
+or network operations. Playback starts muted; the workspace handover mutes the
+desktop player before enabling it. Losing this output restores desktop audio.
+
+Build the matching `nightfall-stream` Android library first. The XR build links
+its exported `MeteorCipher` implementation; the core and XR extension must use
+matching sources/ABI and both must be packaged. `build_android.sh` resolves the
+matching debug/release core library automatically. For an isolated native build,
+set `NIGHTFALL_STREAM_RUNTIME_LIBRARY` to that library's absolute path. A missing
+library fails configuration. `readelf -d` must show its filename in `NEEDED`,
+without an absolute build-machine path.
+
+Runtime status distinguishes audio configuration, readiness, failure, enablement
+and received/played/queued/trimmed frames. These counters do not prove audible
+playback; use a known PC sound and listen through the headset.
+
 # On-headset depth refinement
 
 Android's Advanced/Settings → AI 3D section exposes **Edge Alignment** and

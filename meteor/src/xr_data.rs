@@ -14,6 +14,9 @@ pub enum Kind {
     VideoFeedback = 4,
     AttachVideo = 5,
     AttachTracking = 6,
+    Audio = 7,
+    AttachAudio = 8,
+    AudioFeedback = 9,
 }
 impl Kind {
     fn bound(self) -> usize {
@@ -22,7 +25,9 @@ impl Kind {
             Self::HeadsetTracking => 192,
             Self::HostTracking => 32,
             Self::VideoFeedback => 20,
-            Self::AttachVideo | Self::AttachTracking => 32,
+            Self::AttachVideo | Self::AttachTracking | Self::AttachAudio => 32,
+            Self::Audio => crate::xr_audio::MAX_PACKET,
+            Self::AudioFeedback => 12,
         }
     }
 }
@@ -180,6 +185,12 @@ pub(crate) fn validate_payload(
     }
     let valid = match kind {
         Kind::Video => unreachable!(),
+        Kind::Audio => {
+            let header=crate::xr_audio::Header::decode(bytes)?;
+            return if bytes.len()==crate::xr_audio::HEADER+header.payload_len() {Ok(())}
+                else {Err(invalid("XR PCM inner payload length"))};
+        },
+        Kind::AudioFeedback => bytes.len()==12 && bytes.starts_with(b"NFAC"),
         Kind::HeadsetTracking => matches!(
             (bytes.get(..4), bytes.len()),
             (Some(b"NFXC" | b"NFXH"), 32)
@@ -198,10 +209,10 @@ pub(crate) fn validate_payload(
             (bytes.get(..4), bytes.len()),
             (Some(b"NFXA"), 20) | (Some(b"NFXE"), 12)
         ),
-        Kind::AttachVideo | Kind::AttachTracking => {
+        Kind::AttachVideo | Kind::AttachTracking | Kind::AttachAudio => {
             bytes.len() == 32
                 && bytes.starts_with(b"NFXB")
-                && bytes[4] == if kind == Kind::AttachVideo { 1 } else { 2 }
+                && bytes[4] == if kind == Kind::AttachVideo { 1 } else if kind==Kind::AttachAudio {3} else { 2 }
                 && bytes[5..8] == [0; 3]
                 && bytes[24..] == [0; 8]
         }
@@ -211,7 +222,7 @@ pub(crate) fn validate_payload(
     }
     if !matches!(
         kind,
-        Kind::VideoFeedback | Kind::AttachVideo | Kind::AttachTracking
+        Kind::VideoFeedback | Kind::AttachVideo | Kind::AttachTracking | Kind::AttachAudio | Kind::AudioFeedback
     ) {
         let version = u16::from_le_bytes(bytes[4..6].try_into().unwrap());
         if version

@@ -1,6 +1,7 @@
 class_name MeteorXRControl
 extends RefCounted
 const PCVRVideoSettings = preload("res://src/pcvr_stream_settings.gd")
+const HostDiscovery = preload("res://src/meteor_client.gd")
 ## DEV authenticated control only. Prepared never starts exclusive presentation.
 signal changed
 signal runtime_changed
@@ -63,7 +64,7 @@ static func config_path() -> String:
 static func valid_host(address: String) -> bool:
 	if "%" not in address: return address.is_valid_ip_address()
 	var parts := address.split("%")
-	if parts.size() != 2 or not MeteorClient.is_link_local(parts[0]) or not parts[0].is_valid_ip_address(): return false
+	if parts.size() != 2 or not HostDiscovery.is_link_local(parts[0]) or not parts[0].is_valid_ip_address(): return false
 	return parts[1].is_valid_identifier() or (parts[1].is_valid_int() and int(parts[1]) > 0)
 
 static func _new_peer(address: String):
@@ -72,7 +73,7 @@ static func _new_peer(address: String):
 	return StreamPeerTCP.new()
 
 func set_discovered_host(address: String, info: Dictionary) -> void:
-	var offer := MeteorClient.xr_info(info)
+	var offer := HostDiscovery.xr_info(info)
 	if offer.is_empty() or not valid_host(address):
 		if state == "watching": cancel()
 		_discovered_config = null
@@ -563,6 +564,12 @@ func _offer_authenticated(config: ConfigFile, token: int) -> void:
 	if configured.get("state", "") != "idle" or configured.get("reason") != null:
 		_fail("Host rejected PCVR video configuration; update Meteor")
 		return
+	if OS.get_name() == "Android" and bool(encoder_capabilities.get("audio_pcm", false)) and owner.pcvr_test.backend.has_method("start_meteor_audio"):
+		var audio_reply := await _request({"type": "configure_audio", "enabled": true}, token)
+		if token != _generation: return
+		if audio_reply.get("state", "") != "idle" or audio_reply.get("reason") != null:
+			_fail("Host rejected independent PCVR audio configuration")
+			return
 	owner._log("[PCVR] Offer %dx%d per eye, %d%%, centre-priority encoding=%s" % [eye_size, eye_height, video_settings.resolution_percent, effective_foveation(video_settings.foveated_encoding)])
 	var offer := await _request({"type": "offer_long" if _long_run else "offer", "width": eye_size, "height": eye_height, "hz": hz}, token)
 	if token != _generation: return
@@ -652,6 +659,9 @@ func _start_relay(ports: Dictionary, token: int) -> void:
 	if token != _generation: return
 	if not _relay.start(_relay_config):
 		_fail("Native relay startup failed")
+		return
+	if bool(ports.get("audio", false)) and not owner.pcvr_test.backend.start_meteor_audio(_relay_config):
+		_fail("Independent XR audio endpoint startup failed")
 		return
 	if _handover_on_ready and not owner.pcvr_handover.arm(self):
 		_fail("XR handover needs the updated native provider and no browser workspace")

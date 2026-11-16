@@ -343,6 +343,7 @@ Physical Quest 2 / Arc 140V / USB Open Brush samples:
 | Repeat at 2752×1440 | 69.1 | 82.0 | 80.8 |
 | 90 Hz, 2208×1152, same worker | 91.6 | 70.9 | 70.2 |
 | Further 2752×1440 timing sample | 51.1 | 75.2 | 74.3 |
+| Fresh client restart, retained build, 2752×1440 | 31.5 | 74.5 | 74.0 |
 
 All these streams were H.264. One local artifact was named `90hz-hevc`, but
 device telemetry confirmed H.264; it is not evidence of a physical HEVC test.
@@ -371,6 +372,10 @@ bridge passed 24-frame H.264 and HEVC 90 Hz decoded image/pose checks, a 12-fram
 90 Hz quad geometry/alpha/eye-visibility check, and a 24-frame 72 Hz fallback
 check, all with clean wire END. Software restart checks restore desktop
 60 FPS / 120 Hz timing after VR and preserve the saved 90 Hz preference.
+The final headset restart retained 90 Hz / 75% resolution, automatically handed
+Open Brush over to VR, stopped desktop media and enabled independent audio.
+The refresh selector was visually checked in the existing video-control row;
+the lower status text remained visible.
 
 Repeat the image check with `test/smoke_windows_vdxr.py --hz 90 --frame-ids
 --preflight` and the existing runtime/build/output arguments. Run

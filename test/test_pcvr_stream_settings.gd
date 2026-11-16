@@ -10,6 +10,9 @@ class Device extends RefCounted:
 
 func _init() -> void:
 	_test_quest3_defaults()
+	assert(Video.host_refresh_rates(JSON.parse_string('{"refresh_rates":[20,60,72,90]}')) == [20,60,72,90])
+	assert(Video.host_refresh_rates({}) == [20,60,72])
+	assert(Video.host_refresh_rates({"refresh_rates":[NAN, "90", 90.5, true, 144]}) == [])
 	var runtime := RuntimeRecommendation.new()
 	var device := Device.new()
 	assert(Video.reference_eye_dimensions(runtime, device) == Vector2i(2064,2208))
@@ -57,12 +60,14 @@ func _init() -> void:
 	assert(settings.bitrate_mbps == 16)
 	settings.sharpen = 2
 	settings.sampling = 1
+	settings.stream_fps = 90
 	var path := "user://pcvr-video-unit-test.cfg"
 	assert(settings.save_to(path) == OK)
 	var loaded := Video.new()
 	loaded.load_from(path)
 	assert(loaded.resolution_percent == 100 and loaded.bitrate_mbps == 16)
 	assert(loaded.sharpen == 2 and loaded.sampling == 1)
+	assert(loaded.stream_fps == 90)
 	# Extended mode changes choices without silently changing the target.
 	settings.resolution_percent = 105
 	settings.extended_resolution_range = true
@@ -87,9 +92,11 @@ func _init() -> void:
 	var bad := ConfigFile.new()
 	bad.set_value("video", "eye_size", 99999)
 	bad.set_value("video", "bitrate_mbps", -1)
+	bad.set_value("video", "stream_fps", 120)
 	assert(bad.save(path) == OK)
 	loaded.load_from(path)
 	assert(loaded.eye_size == 0 and loaded.bitrate_mbps == 0)
+	assert(loaded.stream_fps == 72)
 	assert(DirAccess.remove_absolute(path) == OK)
 	for _i in Video.BITRATES.size() - 1: settings.cycle_bitrate()
 	assert(settings.bitrate_mbps == 0)
@@ -106,6 +113,10 @@ func _test_quest3_defaults() -> void:
 	assert(Video.offer_rate(0, true) == 72)
 	assert(Video.offer_rate(20, false) == 20)
 	assert(Video.offer_rate(20, true) == 72)
+	assert(Video.offer_rate(0, false, 90) == 90)
+	assert(Video.offer_rate(0, true, 90) == 90)
+	assert(Video.offer_rate(90, true) == 90)
+	assert(Video.offer_rate(0, false, 120) == 72)
 	var path := "user://pcvr-quest3-defaults-unit-test.cfg"
 	settings.load_from(path)
 	assert(settings.eye_size == 2048 and settings.bitrate_mbps == 80)

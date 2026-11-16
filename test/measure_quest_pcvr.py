@@ -99,7 +99,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--seconds', type=float, default=35)
     parser.add_argument('--port', type=int, default=47950)
-    parser.add_argument('--render-cap', type=int, choices=[0, 72])
+    parser.add_argument('--render-cap', type=int, choices=[0, 72, 90])
     parser.add_argument('--decoder-poll-ms', type=int, choices=range(1, 11))
     parser.add_argument('--buffered', choices=['on', 'off'])
     parser.add_argument('--output', type=Path, required=True)

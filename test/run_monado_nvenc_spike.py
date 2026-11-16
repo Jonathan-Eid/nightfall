@@ -44,8 +44,8 @@ def run_isolated(root: Path, out: Path, runtime: Path, transport):
     bitrate_mbps = int(os.environ.get("NIGHTFALL_XR_BITRATE_MBPS", "0"))
     if bitrate_mbps != 0 and not 8 <= bitrate_mbps <= 160:
         raise ValueError("XR bitrate must be Auto (0) or 8..160 Mbps")
-    if not all(256 <= size <= 4096 and size % 16 == 0 for size in (eye_size, eye_height)) or target_hz not in (20,60,72):
-        raise ValueError("Diagnostic profiles: eye size 256..4096, multiple of 16; target rate 20/60/72")
+    if not all(256 <= size <= 4096 and size % 16 == 0 for size in (eye_size, eye_height)) or target_hz not in (20,60,72,90):
+        raise ValueError("Diagnostic profiles: eye size 256..4096, multiple of 16; target rate 20/60/72/90")
     tracked_scene = os.environ.get("METEOR_XR_TRACKED_SCENE") == "1"
     gpu_scene = os.environ.get("NIGHTFALL_XR_GPU_SCENE") == "1"
     gpu_measure = os.environ.get("NIGHTFALL_XR_GPU_MEASURE") == "1"

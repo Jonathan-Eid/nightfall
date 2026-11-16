@@ -32,7 +32,7 @@ public:
     bool header(const std::array<uint8_t, 152> &h, MeteorXrFrame &f) const {
         if (ended || std::memcmp(h.data(), "NFXR", 4) || meteor_xr_le(h.data()+4, 2) != 1 ||
             meteor_xr_le(h.data()+6, 2) != 152 || (h[48] != 1 && h[48] != 2) || h[49] > 3 || h[50] > 1 ||
-            (h[51] != 0 && h[51] != 20 && h[51] != 60 && h[51] != 72)) return false;
+            (h[51] != 0 && h[51] != 20 && h[51] != 60 && h[51] != 72 && h[51] != 90)) return false;
         for (unsigned i = 52; i < 64; ++i) if (h[i]) return false;
         f.codec=h[48]; f.fps=h[51] ? h[51] : 60;
         f.epoch = meteor_xr_le(h.data()+8,8); f.sequence = meteor_xr_le(h.data()+16,8);

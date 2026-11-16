@@ -9,8 +9,10 @@ const BITRATES := [0, 16, 32, 48, 64, 80, 100, 120, 160]
 const QUEST3_EYE_SIZE := 2048 # Square per-eye view, not the physical panel dimensions.
 const QUEST3_BITRATE_MBPS := 80 # Conservative H.264 baseline; not a network benchmark.
 const QUEST3_STREAM_FPS := 72
-## Every supported headset (Quest 2, 3S and 3) runs PCVR at 72 Hz, and long sessions require 60 or 72.
+## Preserve the existing default. 90 Hz is an explicit PCVR preference.
 const STREAM_FPS := 72
+const REFRESH_RATES := [72, 90]
+var stream_fps := STREAM_FPS
 var _default_eye_size := 0
 var _default_bitrate_mbps := 0
 var eye_size := 0 # Unset: retain the developer host profile's resolution.
@@ -28,6 +30,7 @@ func _init(quest3: bool = false) -> void:
 	bitrate_mbps = _default_bitrate_mbps
 
 func load_from(path: String = PATH) -> void:
+	stream_fps = STREAM_FPS
 	eye_size = _default_eye_size
 	resolution_percent = 100
 	extended_resolution_range = false
@@ -37,6 +40,8 @@ func load_from(path: String = PATH) -> void:
 	foveated_encoding = false
 	var config := ConfigFile.new()
 	if config.load(path) != OK: return
+	var rate := int(config.get_value("video", "stream_fps", STREAM_FPS))
+	stream_fps = rate if rate in REFRESH_RATES else STREAM_FPS
 	extended_resolution_range = bool(config.get_value("video", "extended_resolution_range", false))
 	foveated_encoding = bool(config.get_value("video", "foveated_encoding", false))
 	var size := int(config.get_value("video", "eye_size", _default_eye_size))
@@ -54,6 +59,7 @@ func load_from(path: String = PATH) -> void:
 func save_to(path: String = PATH) -> Error:
 	var config := ConfigFile.new()
 	config.set_value("video", "eye_size", eye_size)
+	config.set_value("video", "stream_fps", stream_fps)
 	config.set_value("video", "resolution_percent", resolution_percent)
 	config.set_value("video", "extended_resolution_range", extended_resolution_range)
 	config.set_value("video", "bitrate_mbps", bitrate_mbps)
@@ -65,6 +71,18 @@ func save_to(path: String = PATH) -> Error:
 static func valid_eye_size(size: int) -> bool:
 	return size >= 256 and size <= 4096 and size % 16 == 0
 
+static func host_refresh_rates(capabilities: Dictionary) -> Array[int]:
+	var result: Array[int] = []
+	var values: Variant = capabilities.get("refresh_rates", [20, 60, 72])
+	if not values is Array: return result
+	# JSON numbers arrive as floats. Normalize validated integral rates before
+	# array membership checks, which otherwise reject even a supported 72 Hz.
+	for value in values:
+		if typeof(value) not in [TYPE_INT, TYPE_FLOAT] or not is_finite(float(value)): continue
+		for rate in [20, 60, 72, 90]:
+			if float(value) == rate and rate not in result: result.append(rate)
+	return result
+
 static func recommended_eye_size(backend) -> int:
 	if backend == null or not backend.has_method("get_pcvr_recommended_eye_size"): return 0
 	var recommended: Vector2i = backend.get_pcvr_recommended_eye_size()
@@ -75,12 +93,11 @@ static func recommended_eye_dimensions(backend) -> Vector2i:
 	if backend == null or not backend.has_method("get_pcvr_recommended_eye_size"): return Vector2i.ZERO
 	return backend.get_pcvr_recommended_eye_size()
 
-## The PCVR rate to offer. Automatic XR (a discovered Meteor) sets no rate, so every headset
-## gets STREAM_FPS; only a developer config's explicit rate overrides it, except on Quest 3,
-## which always streams at 72 Hz.
-static func offer_rate(configured_hz: int, quest3: bool) -> int:
-	if quest3 or configured_hz <= 0:
-		return STREAM_FPS
+## Automatic XR uses the saved PCVR rate. Explicit diagnostic profiles remain
+## separate; retain the old Quest 3 guard against its legacy 20 Hz profile.
+static func offer_rate(configured_hz: int, quest3: bool, preference: int = STREAM_FPS) -> int:
+	if configured_hz <= 0 or (quest3 and configured_hz == 20):
+		return preference if preference in REFRESH_RATES else STREAM_FPS
 	return configured_hz
 
 static func panel_eye_dimensions(device: String) -> Vector2i:

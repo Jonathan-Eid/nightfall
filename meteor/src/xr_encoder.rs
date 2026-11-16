@@ -4,6 +4,8 @@ use std::{path::Path,time::Duration};
 
 #[derive(Clone,Debug,PartialEq,Serialize,Deserialize)]
 pub struct Capabilities {
+    #[serde(default="legacy_refresh_rates")]
+    pub refresh_rates:Vec<u32>,
     #[serde(default)]
     pub audio_pcm:bool,
     pub backend:String,
@@ -17,6 +19,7 @@ pub struct Capabilities {
     #[serde(default,skip_serializing_if="Option::is_none")]
     pub error:Option<String>,
 }
+fn legacy_refresh_rates()->Vec<u32> {vec![20,60,72]}
 impl Capabilities {
     /// Whether a stereo frame of two eyes this size fits the encoder.
     pub fn fits_eyes(&self,width:u32,height:u32)->bool {
@@ -42,7 +45,7 @@ impl Monitor {
         self.value=Some(match reported {
             Some(json)=>parse_reported(&json).unwrap_or_else(||unavailable("Invalid encoder capability response")),
             // A DLL from before AMF support reports nothing: NVENC, as it always was.
-            None=>Capabilities {audio_pcm:false,backend:"nvenc".into(),foveated_encoding:false,live_bitrate:false,codecs:vec!["h264".into(),"h265".into()],max_frame:None,error:None},
+            None=>Capabilities {refresh_rates:legacy_refresh_rates(),audio_pcm:false,backend:"nvenc".into(),foveated_encoding:false,live_bitrate:false,codecs:vec!["h264".into(),"h265".into()],max_frame:None,error:None},
         });
         self.value.clone()
     }
@@ -74,11 +77,12 @@ impl Monitor {
 #[cfg_attr(not(windows),allow(dead_code))]
 fn parse_reported(json:&str)->Option<Capabilities> {
     #[derive(Deserialize)]
-    struct Reported {backend:String,codecs:Vec<String>,#[serde(default)] max_frame:Option<[u32;2]>,#[serde(default)] audio_pcm:bool}
+    struct Reported {backend:String,codecs:Vec<String>,#[serde(default)] max_frame:Option<[u32;2]>,#[serde(default)] audio_pcm:bool,#[serde(default="legacy_refresh_rates")] refresh_rates:Vec<u32>}
     let reported:Reported=serde_json::from_str(json).ok()?;
     if !matches!(reported.backend.as_str(),"nvenc"|"amf"|"qsv") || reported.codecs.is_empty()
+        || reported.refresh_rates.is_empty() || reported.refresh_rates.iter().any(|hz|!matches!(hz,20|60|72|90))
         || reported.codecs.iter().any(|codec|!matches!(codec.as_str(),"h264"|"h265")) {return None;}
-    Some(Capabilities {audio_pcm:reported.audio_pcm,backend:reported.backend,foveated_encoding:false,live_bitrate:false,codecs:reported.codecs,
+    Some(Capabilities {refresh_rates:reported.refresh_rates,audio_pcm:reported.audio_pcm,backend:reported.backend,foveated_encoding:false,live_bitrate:false,codecs:reported.codecs,
         max_frame:reported.max_frame.filter(|[w,h]|*w>0 && *h>0),error:None})
 }
 
@@ -109,7 +113,7 @@ mod windows_dll {
     }
 }
 
-fn unavailable(error:&str)->Capabilities {Capabilities{audio_pcm:false,backend:"unavailable".into(),foveated_encoding:false,live_bitrate:false,codecs:vec![],max_frame:None,error:Some(error.into())}}
+fn unavailable(error:&str)->Capabilities {Capabilities{refresh_rates:legacy_refresh_rates(),audio_pcm:false,backend:"unavailable".into(),foveated_encoding:false,live_bitrate:false,codecs:vec![],max_frame:None,error:Some(error.into())}}
 
 #[cfg(test)]
 mod tests {
@@ -128,6 +132,10 @@ mod tests {
         assert!(parse_reported("not json").is_none());
         let qsv=parse_reported(r#"{"backend":"qsv","codecs":["h264","h265"],"max_frame":[4096,4096]}"#).unwrap();
         assert_eq!(qsv.backend,"qsv");
+	    assert!(!qsv.refresh_rates.contains(&90));
+        let fast=parse_reported(r#"{"backend":"qsv","codecs":["h264"],"refresh_rates":[20,60,72,90]}"#).unwrap();
+        assert!(fast.refresh_rates.contains(&90));
+        assert!(parse_reported(r#"{"backend":"qsv","codecs":["h264"],"refresh_rates":[144]}"#).is_none());
         assert!(!qsv.foveated_encoding && !qsv.live_bitrate);
         assert!(qsv.fits_eyes(1280,1344) && !qsv.fits_eyes(2064,2208));
         assert!(parse_reported(r#"{"backend":"qsv","codecs":["av1"]}"#).is_none());

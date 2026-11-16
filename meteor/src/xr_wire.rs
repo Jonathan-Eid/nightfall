@@ -36,7 +36,7 @@ impl Header {
         if !matches!(bytes[48],1 | 2)
             || bytes[49] & !3 != 0
             || bytes[50] > 1
-            || !matches!(bytes[51],0 | 20 | 60 | 72)
+            || !matches!(bytes[51],0 | 20 | 60 | 72 | 90)
             || bytes[52..64].iter().any(|b| *b != 0)
         {
             return Err(invalid("XR codec/flags/kind/reserved"));
@@ -220,6 +220,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ninety_hz_is_valid_but_cannot_change_mid_stream() {
+        let mut bytes=packet();bytes[51]=90;
+        let mut reader=Reader::default();
+        assert_eq!(reader.read(&mut Cursor::new(&bytes)).unwrap().unwrap().header.fps,90);
+        bytes[16..24].copy_from_slice(&1u64.to_le_bytes());
+        bytes[24..32].copy_from_slice(&2u64.to_le_bytes());
+        bytes[32..40].copy_from_slice(&2u64.to_le_bytes());
+        bytes[51]=72;
+        assert!(reader.read(&mut Cursor::new(&bytes)).is_err());
+        bytes[51]=120;
+        assert!(Reader::default().read(&mut Cursor::new(bytes)).is_err());
+    }
     #[test]
     fn hevc_2k_72_profile_and_frozen_codec() {
         let mut b=packet();

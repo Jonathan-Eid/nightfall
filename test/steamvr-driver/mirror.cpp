@@ -147,7 +147,7 @@ int wmain(int argc,wchar_t **argv) {
         if(auto text=std::getenv("METEOR_XR_EYE_SIZE"))w=unsigned(std::atoi(text));
         if(auto text=std::getenv("METEOR_XR_EYE_HEIGHT"))h=unsigned(std::atoi(text));
         unsigned fps=72;if(auto text=std::getenv("XRT_COMPOSITOR_NULL_FPS"))fps=unsigned(std::atoi(text));
-        if(w<256 || w>4096 || w%16 || h<256 || h>4096 || h%16 || (fps!=20 && fps!=60 && fps!=72))throw std::runtime_error("Unsupported SteamVR video dimensions/rate");
+        if(w<256 || w>4096 || w%16 || h<256 || h>4096 || h%16 || (fps!=20 && fps!=60 && fps!=72 && fps!=90))throw std::runtime_error("Unsupported SteamVR video dimensions/rate");
         MirrorEncoder encoder;FILE *recording=nullptr;
         if(encode) {
             encoder.initialize(device.Get(),w,h,fps);

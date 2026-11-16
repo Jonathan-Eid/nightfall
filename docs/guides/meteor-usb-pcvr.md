@@ -39,6 +39,19 @@ PCVR runtime does not require Meta Dash or a Horizon Link session.
    Keep the same resolution, bitrate and refresh rate when comparing USB
    with Wi-Fi.
 
+## Choose the PCVR refresh rate
+
+In the headset, open **PCVR → Refresh rate** and choose **72 Hz** or
+**90 Hz**. The choice is saved and applies to the next VR session; exit the
+game and launch it again. It changes the requested stream rate and headset
+refresh together. It does not overwrite the desktop streaming preference.
+
+72 Hz remains the default. 90 Hz requires the updated client, Meteor host,
+QSV bridge and standalone VDXR runtime together. A host that does not advertise
+90 Hz, or a headset display without that mode, disables the choice. Higher
+refresh needs more rendering and encoding capacity: selecting 90 Hz does not
+guarantee 90 new frames per second. See the checkpoint's measured results.
+
 ## Install, repair and remove the USB firewall policy
 
 Run this from the extracted Meteor host folder containing

@@ -62,9 +62,18 @@ struct Encoder {
         if(!output)throw std::runtime_error("Packet pointer is null");*output={};mfxBitstream bs{};bs.Data=bits.data();bs.MaxLength=mfxU32(bits.size());mfxSyncPoint sync{};mfxEncodeCtrl ctrl{};
         if(idr)ctrl.FrameType=MFX_FRAMETYPE_I|MFX_FRAMETYPE_IDR|MFX_FRAMETYPE_REF;
         mfxStatus status{};int retries=0;
+        const auto submit_start=std::chrono::steady_clock::now();
         do{status=vpl.MFXVideoENCODE_EncodeFrameAsync_p(vpl.session,idr?&ctrl:nullptr,input,&bs,&sync);if(status==MFX_WRN_DEVICE_BUSY)std::this_thread::sleep_for(std::chrono::milliseconds(1));}while(status==MFX_WRN_DEVICE_BUSY&&++retries<1000);
         if(status==MFX_ERR_MORE_DATA)return 1;require(status,"Encode frame");if(!sync)throw std::runtime_error("Encoder returned no sync point");
-        require(vpl.MFXVideoCORE_SyncOperation_p(vpl.session,sync,10000),"Synchronize encoded frame");
+        const auto sync_start=std::chrono::steady_clock::now();
+        const mfxStatus completion=vpl.MFXVideoCORE_SyncOperation_p(vpl.session,sync,10000);
+        if(completion!=MFX_ERR_NONE)throw std::runtime_error("Encoded frame did not complete: "+std::to_string(completion));
+        if(frame_order==1 || frame_order%72==0){
+            const auto end=std::chrono::steady_clock::now();
+            std::fprintf(stderr,"METEOR_QSV_CORE frame=%u submit_us=%lld sync_us=%lld busy_retries=%d\n",frame_order-1,
+                (long long)std::chrono::duration_cast<std::chrono::microseconds>(sync_start-submit_start).count(),
+                (long long)std::chrono::duration_cast<std::chrono::microseconds>(end-sync_start).count(),retries);std::fflush(stderr);
+        }
         output->data=bs.Data+bs.DataOffset;output->size=bs.DataLength;output->timestamp_90k=bs.TimeStamp;output->frame_type=bs.FrameType;return 0;
     }
     int cpu(const uint8_t* y,uint32_t yp,const uint8_t* uv,uint32_t uvp,uint64_t ts,bool idr,ArcQsvPacket* packet){
@@ -78,7 +87,18 @@ struct Encoder {
         if(d.Format!=DXGI_FORMAT_NV12||d.Width!=frame.Width||d.Height!=frame.Height||d.ArraySize!=1||d.SampleDesc.Count!=1)throw std::runtime_error("Expected one aligned NV12 texture");
         ID3D11Device* tex_device{};tex->GetDevice(&tex_device);const bool same=tex_device==device;tex_device->Release();if(!same)throw std::runtime_error("Texture belongs to another D3D11 device");
         mfxSurfaceD3D11Tex2D external{};external.SurfaceInterface.Header.SurfaceType=MFX_SURFACE_TYPE_D3D11_TEX2D;external.SurfaceInterface.Header.SurfaceFlags=MFX_SURFACE_FLAG_IMPORT_SHARED|MFX_SURFACE_FLAG_IMPORT_COPY;external.SurfaceInterface.Header.StructSize=sizeof(external);external.texture2D=tex;
+        const auto import_start=std::chrono::steady_clock::now();
         mfxFrameSurface1* imported{};require(memory->ImportFrameSurface(memory,MFX_SURFACE_COMPONENT_ENCODE,&external.SurfaceInterface.Header,&imported),"Import D3D11 texture");
+        if(frame_order==0 || (frame_order+1)%72==0){
+            const auto us=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-import_start).count();
+            std::fprintf(stderr,"METEOR_QSV_IMPORT_TIMING frame=%u import_us=%lld\n",frame_order,(long long)us);std::fflush(stderr);
+        }
+        if(frame_order==0){
+            std::fprintf(stderr,"METEOR_QSV_IMPORT surface=d3d11 actual_flags=0x%x shared=%u copy=%u\n",
+                unsigned(external.SurfaceInterface.Header.SurfaceFlags),
+                unsigned(bool(external.SurfaceInterface.Header.SurfaceFlags&MFX_SURFACE_FLAG_IMPORT_SHARED)),
+                unsigned(bool(external.SurfaceInterface.Header.SurfaceFlags&MFX_SURFACE_FLAG_IMPORT_COPY)));std::fflush(stderr);
+        }
         if(!imported||!imported->FrameInterface)throw std::runtime_error("Import returned no surface interface");
         struct Release{mfxFrameSurface1* s;~Release(){s->FrameInterface->Release(s);}} release{imported};
         imported->Data.TimeStamp=ts;imported->Data.FrameOrder=frame_order++;return submit(imported,idr,packet);

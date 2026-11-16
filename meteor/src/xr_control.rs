@@ -161,10 +161,13 @@ impl Negotiation {
                 if self.session.is_some() {
                     return Ok(self.reply(Some("busy")));
                 }
-                if !valid_eye_size(height) || !valid_eye_size(width) || !matches!(hz, 20 | 60 | 72) || (long_run && !matches!(hz,60 | 72)) {
+                if !valid_eye_size(height) || !valid_eye_size(width) || !matches!(hz, 20 | 60 | 72 | 90) || (long_run && !matches!(hz,60 | 72 | 90)) {
                     return Ok(self.reply(Some("unsupported_profile")));
                 }
                 // Older GPUs stop at 4096 per side; a larger frame would fail inside the runtime.
+                if self.encoder.as_ref().is_some_and(|caps|!caps.refresh_rates.contains(&hz)) {
+                    return Ok(self.reply(Some("unsupported_refresh_rate")));
+                }
                 if self.encoder.as_ref().is_some_and(|caps|!caps.fits_eyes(width,height)) {
                     return Ok(self.reply(Some("frame_too_large")));
                 }
@@ -482,7 +485,7 @@ async fn connection_supervised(
                 negotiation.reply(None)
             } else {negotiation.reply(Some("launch_intent_unavailable"))}
         } else if enable_relay
-            && matches!(&request,Request::Offer{width,height,hz}|Request::OfferLong{width,height,hz} if !valid_eye_size(*height) || !valid_eye_size(*width) || !matches!(hz,20|60|72))
+            && matches!(&request,Request::Offer{width,height,hz}|Request::OfferLong{width,height,hz} if !valid_eye_size(*height) || !valid_eye_size(*width) || !matches!(hz,20|60|72|90))
         {
             negotiation.reply(Some("unsupported_relay_profile"))
         } else {
@@ -938,12 +941,28 @@ mod tests {
     }
 
     #[test]
+    fn ninety_hz_requires_advertised_support_and_is_retained_in_the_session() {
+        let mut state=Negotiation::default();
+        state.encoder=Some(crate::xr_encoder::Capabilities {
+            refresh_rates:vec![20,60,72], backend:"qsv".into(), codecs:vec!["h264".into()],
+            foveated_encoding:false,audio_pcm:true,live_bitrate:false,max_frame:None,error:None,
+        });
+        assert_eq!(state.apply(Request::OfferLong{width:1376,height:1440,hz:90}).unwrap().reason.as_deref(),Some("unsupported_refresh_rate"));
+        state.encoder.as_mut().unwrap().refresh_rates.push(90);
+        let offer=state.apply(Request::OfferLong{width:1376,height:1440,hz:90}).unwrap();
+        assert_eq!(offer.state,"awaiting_acceptance");
+        let accepted=state.apply(Request::Accept{session:offer.session.unwrap()}).unwrap();
+        assert_eq!(accepted.state,"prepared");
+        assert_eq!(state.session.as_ref().unwrap().hz,90);
+    }
+
+    #[test]
     fn independent_audio_is_opt_in_capability_and_frozen_with_session() {
         let mut state=Negotiation::default();
         assert_eq!(state.apply(Request::ConfigureAudio{enabled:true}).unwrap().reason.as_deref(),Some("unsupported_audio"));
         assert!(!state.audio);
         state.encoder=Some(crate::xr_encoder::Capabilities {
-            backend:"qsv".into(), codecs:vec!["h264".into()], foveated_encoding:false,
+            refresh_rates:vec![20,60,72,90], backend:"qsv".into(), codecs:vec!["h264".into()], foveated_encoding:false,
             audio_pcm:true, live_bitrate:true, max_frame:None, error:None,
         });
         assert!(state.apply(Request::ConfigureAudio{enabled:true}).unwrap().reason.is_none());
@@ -971,7 +990,7 @@ mod tests {
     #[test]
     fn unsupported_encoder_masks_foveation_without_rejecting_stream() {
         let mut state=Negotiation::default();
-        state.encoder=Some(crate::xr_encoder::Capabilities{audio_pcm:false,backend:"vaapi".into(),foveated_encoding:false,live_bitrate:false,codecs:vec!["h264".into(),"h265".into()],max_frame:None,error:None});
+        state.encoder=Some(crate::xr_encoder::Capabilities{refresh_rates:vec![20,60,72],audio_pcm:false,backend:"vaapi".into(),foveated_encoding:false,live_bitrate:false,codecs:vec!["h264".into(),"h265".into()],max_frame:None,error:None});
         let reply=state.apply(Request::ConfigureVideo{bitrate_mbps:32,codec:Some("h264".into()),foveated_encoding:true}).unwrap();
         assert!(reply.reason.is_none());assert!(!reply.encoder.unwrap().foveated_encoding);
         state.apply(Request::Offer{width:512,height:512,hz:20}).unwrap();
@@ -980,7 +999,7 @@ mod tests {
 
     #[test]
     fn offers_must_fit_the_encoders_largest_frame() {
-        let caps=|max_frame|crate::xr_encoder::Capabilities{audio_pcm:false,backend:"vaapi".into(),foveated_encoding:false,live_bitrate:false,codecs:vec!["h265".into()],max_frame,error:None};
+        let caps=|max_frame|crate::xr_encoder::Capabilities{refresh_rates:vec![20,60,72],audio_pcm:false,backend:"vaapi".into(),foveated_encoding:false,live_bitrate:false,codecs:vec!["h265".into()],max_frame,error:None};
         // AMD Polaris: 4096 per side, so two 2064-wide eyes (4128) don't fit.
         let mut state=Negotiation::default();
         state.encoder=Some(caps(Some([4096,4096])));

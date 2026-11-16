@@ -215,7 +215,7 @@ class Provider:public vr::IServerTrackedDeviceProvider {
             if(initialized && (next_width!=width || next_height!=height || next_hz!=hz))
                 throw std::runtime_error("Restart SteamVR to change its eye dimensions or refresh rate");
             if(!initialized) {width=next_width;height=next_height;hz=next_hz;}
-            if(hz!=20 && hz!=60 && hz!=72)throw std::runtime_error("Unsupported SteamVR display rate");
+            if(hz!=20 && hz!=60 && hz!=72 && hz!=90)throw std::runtime_error("Unsupported SteamVR display rate");
             synthetic=legacy && !std::strcmp(env("METEOR_STEAMVR_SYNTHETIC"),"1");
             bool next_direct=!std::strcmp(env("METEOR_STEAMVR_DIRECT"),"1");
             if(initialized && next_direct!=direct_mode)throw std::runtime_error("Restart SteamVR to change capture mode");

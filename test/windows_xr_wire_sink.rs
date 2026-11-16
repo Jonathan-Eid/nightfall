@@ -37,7 +37,7 @@ fn main() -> io::Result<()> {
         ack.extend_from_slice(&frame.header.frame_id.to_le_bytes());
         socket.write_all(&ack)?;
         count+=1;
-        println!("validated_frame={} size={}x{} bytes={}",count,frame.header.width,frame.header.height,frame.payload.len());
+        println!("validated_frame={} size={}x{} fps={} bytes={}",count,frame.header.width,frame.header.height,frame.header.fps,frame.payload.len());
     }
     let mut ack = b"NFXE".to_vec(); ack.extend_from_slice(&count.to_le_bytes());
     socket.write_all(&ack)?;

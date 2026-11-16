@@ -398,7 +398,7 @@ int main(int argc, char **argv) {
     const auto codec_guid=hevc ? NV_ENC_CODEC_HEVC_GUID : NV_ENC_CODEC_H264_GUID;
     const char *rate_text=getenv("XRT_COMPOSITOR_NULL_FPS");
     const uint32_t rate=rate_text ? uint32_t(atoi(rate_text)) : 60;
-    REQUIRE(rate==20 || rate==60 || rate==72,"Unsupported XR encoder rate");
+    REQUIRE(rate==20 || rate==60 || rate==72 || rate==90,"Unsupported XR encoder rate");
     NV(api.nvEncGetEncodePresetConfigEx(encoder, codec_guid, NV_ENC_PRESET_P1_GUID, NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY, &preset));
     preset.presetCfg.frameIntervalP = 1; preset.presetCfg.gopLength = rate;
     if(hevc) {

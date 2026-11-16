@@ -27,6 +27,7 @@ def main():
     parser.add_argument('--output', type=Path, required=True, help='New artifact directory')
     parser.add_argument('--codec', choices=['h264', 'h265'], default='h264')
     parser.add_argument('--frames', type=int, default=24)
+    parser.add_argument('--hz', type=int, choices=[60,72,90], default=72)
     parser.add_argument('--quad', action='store_true')
     parser.add_argument('--frame-ids', action='store_true', help='Verify a changing per-frame color in both decoded eyes')
     parser.add_argument('--gpu', action='store_true', help='Use the GPU performance probe wrapper')
@@ -58,7 +59,7 @@ def main():
         'METEOR_XR_CONTROLLERS': '1', 'METEOR_XR_TOUCH_INPUTS': '1', 'METEOR_XR_HAPTICS': '1',
         'METEOR_XR_HEADSET_OPTICS': '1', 'METEOR_XR_TRACKED_SCENE': '1',
         'METEOR_XR_EYE_SIZE': '1280', 'METEOR_XR_EYE_HEIGHT': '1344',
-        'XRT_COMPOSITOR_NULL_FPS': '72', 'METEOR_XR_CODEC': args.codec, 'METEOR_XR_BITRATE_MBPS': '32',
+        'XRT_COMPOSITOR_NULL_FPS': str(args.hz), 'METEOR_XR_CODEC': args.codec, 'METEOR_XR_BITRATE_MBPS': '32',
         'METEOR_PROBE_OUTPUT': str(out), 'METEOR_OVR_CAPTURE_ACK': '1',
         'METEOR_CONTINUOUS_FRAMES': str(args.frames), 'METEOR_XR_FREE_RUNNING': '1',
     })
@@ -69,7 +70,7 @@ def main():
     if args.frame_ids:
         env.pop('METEOR_XR_TRACKED_SCENE', None)
     children, files = [], []
-    result = {'success': False, 'synthetic_tracking': True, 'gpu_measurement': args.gpu, 'codec': args.codec,
+    result = {'success': False, 'synthetic_tracking': True, 'gpu_measurement': args.gpu, 'codec': args.codec, 'target_hz':args.hz,
               'dimensions': [2560, 1344], 'requested_frames': args.frames, 'quad': args.quad,
               'preflight': args.preflight, 'frame_ids': args.frame_ids}
 
@@ -112,7 +113,8 @@ def main():
         wire = (out / 'sink.out').read_text()
         result['validated_frames'] = wire.count('validated_frame=')
         result['clean_end'] = 'frames and clean END through Meteor wire validator' in wire
-        if result['validated_frames'] != args.frames or not result['clean_end']:
+        result['stream_rate_verified'] = wire.count('fps=' + str(args.hz) + ' ') == args.frames
+        if result['validated_frames'] != args.frames or not result['clean_end'] or not result['stream_rate_verified']:
             raise RuntimeError('Incomplete frame delivery or missing END acknowledgement')
         expected_center = 'Tracked center=0.250000,-1.175000,-0.750000' if args.frame_ids else 'Tracked center=0.250000,0.500000,-0.750000'
         if expected_center not in (out / 'probe.out').read_text():

@@ -139,8 +139,8 @@ At 100% Quest 2 resolution (1840×1920 per eye after alignment), the synchronous
 path delivered about 35 FPS before, and about 45 FPS after, the matching VDXR
 change to consume refresh ticks that arrived while rendering/encoding. These
 are single headset trials, not controlled benchmarks or a stable 72 FPS claim.
-The current client/control/wire protocol accepts only 20/60/72 Hz; enabling
-90 Hz requires coordinated client, host, transport and runtime changes.
+At that checkpoint, the client/control/wire protocol accepted only 20/60/72 Hz.
+The coordinated 90 Hz changes are recorded below.
 
 For physical performance trials, `test/windows_vdxr_gpu_probe.py` can wrap the
 native probe as a registered application's Python script. Pass `--build` with
@@ -306,7 +306,7 @@ averaged 57.0 projection copies/sec. Later in that same session, sequential
 desktop-visible and desktop-stopped samples measured 71.7 copies/sec over
 19.5 seconds and 71.5 over 29.5 seconds. Desktop shutdown is functional; these
 measurements show no FPS gain in this workload and do not establish a sustained
-rate or scanout/motion-to-photon latency. 90 Hz remains unimplemented.
+rate or scanout/motion-to-photon latency. 90 Hz was not implemented at this point.
 
 Validation: 195 Rust tests passed (20 environment-specific tests ignored),
 including optional audio negotiation, duplicate-lane rejection, ordered PCM
@@ -314,4 +314,69 @@ validation, audio forwarding and continued video after audio disconnect.
 Portable PCM/ring tests passed with MSVC; workspace handover and desktop
 reconnect state tests passed in Godot. Android XR and Windows bridge builds
 passed. The read-only WASAPI probe captured 48 kHz stereo without recording it.
+
+### Optional 90 Hz profile and encoder scheduling, November 16
+
+The headset PCVR menu now saves a **72/90 Hz** preference, applied on the next
+VR launch. Automatic sessions use this preference; the default remains 72 Hz.
+Client control, Meteor negotiation, both wire validators, QSV/NVENC bridge
+guards and the standalone VDXR provider accept the coordinated 90 Hz profile.
+The QSV host advertises its supported rates. Missing capabilities retain the
+legacy rates; unsupported host/display choices are disabled. JSON numeric
+capabilities are normalized before comparison, including the floating-point
+values returned by Godot's JSON parser. The selector waits for asynchronous
+menu creation, and its tests cover that startup ordering.
+
+At 90 Hz the OVR bridge uses two owned GPU snapshots with copied image/pose
+metadata, one encode worker and at most one pending frame. A full queue applies
+backpressure rather than continuing to submit discarded GPU work. Shutdown
+joins/drains the worker before ending video or releasing surfaces. The 72 Hz
+path retains its synchronous bridge behavior. Independent VR audio and desktop
+media shutdown remain active.
+
+Physical Quest 2 / Arc 140V / USB Open Brush samples:
+
+| Configuration | Sample seconds | Received FPS | Projection copies/sec |
+| --- | ---: | ---: | ---: |
+| 90 Hz, 2752×1440, original bridge scheduling | 36.1 | 65.1 | 64.8 |
+| 90 Hz, 2752×1440, bounded encode worker | 76.6 | 80.3 | 79.4 |
+| Repeat at 2752×1440 | 69.1 | 82.0 | 80.8 |
+| 90 Hz, 2208×1152, same worker | 91.6 | 70.9 | 70.2 |
+| Further 2752×1440 timing sample | 51.1 | 75.2 | 74.3 |
+
+All these streams were H.264. One local artifact was named `90hz-hevc`, but
+device telemetry confirmed H.264; it is not evidence of a physical HEVC test.
+The headset application loop ran approximately 89.8 FPS at 90 Hz. Decode kept
+pace with received frames. These sequential samples are not controlled
+benchmarks, physical scanout measurements or proof of stable 90 FPS. Separate
+conversion overlap and active encoder-sync polling did not improve throughput
+and were removed. The saved resolution was restored to 75% after the comparison.
+New 90 Hz comfort/tracking feel still needs user confirmation.
+
+A read-only `meteor-qsv-surface-probe` queries the installed Intel VPL driver.
+On this machine API 2.16 advertises shared/copy encode import for D3D11 and
+D3D12, and copy-only import for Vulkan/OpenCL. The running D3D11 NV12 encoder
+actually selects `IMPORT_COPY`; capability advertisement is not proof of
+zero-copy. Shareable texture flags did not change that decision, and a forced
+shared-only import was rejected. Those experiments were reverted. Periodic
+import/submit/sync timings now distinguish CPU import time from waiting for
+encoded output. D3D12 native import remains an investigation, not an implemented
+or benchmarked optimization. References: [Intel surface sharing](https://intel.github.io/libvpl/latest/programming_guide/VPL_prg_surface_sharing.html)
+and [surface structures](https://intel.github.io/libvpl/latest/API_ref/VPL_structs_memory.html).
+
+Validation: 197 Rust tests passed, 20 environment-specific cases ignored;
+targeted Godot refresh-setting, control, stream-setting and handover tests
+passed. Both native wire tests and Windows/Android XR builds passed. The retained
+bridge passed 24-frame H.264 and HEVC 90 Hz decoded image/pose checks, a 12-frame
+90 Hz quad geometry/alpha/eye-visibility check, and a 24-frame 72 Hz fallback
+check, all with clean wire END. Software restart checks restore desktop
+60 FPS / 120 Hz timing after VR and preserve the saved 90 Hz preference.
+
+Repeat the image check with `test/smoke_windows_vdxr.py --hz 90 --frame-ids
+--preflight` and the existing runtime/build/output arguments. Run
+`build/arc/ovr/qsv/Release/meteor-qsv-surface-probe.exe --imports` to examine
+advertised interop and actual D3D11 allocation/import decisions. It uses a
+deterministic small NV12 fixture and does not record the desktop. The headset
+test APK remains a diagnostic repack with a source-built XR addon and preserved
+baseline engine/core libraries; this is not a validated full APK/installer release.
 

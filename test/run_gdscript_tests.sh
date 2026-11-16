@@ -29,6 +29,8 @@ tests=(
 	"test/test_pcvr_stream_telemetry.gd"
 	"test/test_pcvr_timing_policy.gd"
 	"test/test_pcvr_stream_settings.gd"
+	"test/test_pcvr_refresh_control.gd"
+	"test/test_pcvr_desktop_stream.gd"
 	"test/test_pcvr_menu.gd"
 	"test/test_pcvr_session.gd"
 	"test/test_meteor_xr_control.gd"

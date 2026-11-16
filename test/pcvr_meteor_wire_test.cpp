@@ -29,6 +29,12 @@ int main() {
     for(int i=64;i<152;++i)sustained_end[i]=0;
     assert(sustained.header(sustained_end,frame) && sustained.accept(frame,{}));
     MeteorXrWire wire;
+    auto fast=h;fast[51]=90;
+    MeteorXrWire fast_wire;
+    assert(fast_wire.header(fast,frame) && frame.fps==90 && fast_wire.accept(frame,payload));
+    meteor_xr_put(fast.data()+16,1,8);meteor_xr_put(fast.data()+24,2,8);meteor_xr_put(fast.data()+32,2,8);
+    fast[51]=72;assert(!fast_wire.header(fast,frame));
+    fast[51]=120;assert(!MeteorXrWire().header(fast,frame));
     auto rectangular=h;
     meteor_xr_put(rectangular.data()+44,4128,2); meteor_xr_put(rectangular.data()+46,2208,2);
     MeteorXrWire rectangle;

@@ -6,6 +6,10 @@
 #include <mutex>
 #include <fstream>
 #include <chrono>
+#include <array>
+#include <atomic>
+#include <condition_variable>
+#include <thread>
 #include "nightfall_abi.h"
 #include "../meteor_qsv_encoder.h"
 #include "../meteor_encoder_bitrate.h"
@@ -38,14 +42,77 @@ struct Session {
     std::unique_ptr<MeteorQsvEncoder> encoder;
     MeteorWindowsAudioTransport audio;
     std::mutex mutex;
-    bool delivered=false;
+    std::atomic<bool> delivered{false};
+    // At 90 Hz, let the game render while the previous image is encoding.
+    // Each slot owns both the GPU snapshot and its exact render-pose metadata.
+    // Only one pending image is retained. Backpressure bounds GPU submissions
+    // as well as CPU storage: replacing pending snapshots would still enqueue
+    // discarded rendering/copy work and starve encoding on an integrated GPU.
+    struct Frame {
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+        Microsoft::WRL::ComPtr<ID3D11VideoProcessorInputView> view;
+        uint64_t id=0,display_ns=0;
+        std::array<float,22> views{};
+        bool busy=false;
+    };
+    std::array<Frame,2> frames;
+    Frame *pending=nullptr;
+    std::mutex queue_mutex;
+    std::condition_variable queue_changed;
+    std::thread worker;
+    bool stopping=false;
+    std::atomic<bool> failed{false};
+    uint64_t encoded=0;
+    void encode(Frame &frame){
+        const auto encode_start=std::chrono::steady_clock::now();
+        encoder->texture=frame.texture;encoder->input_view=frame.view;
+        std::vector<uint8_t> bytes;
+        const auto capture=[&](const uint8_t *p,uint32_t n){bytes.assign(p,p+n);return true;};
+        if(!encoder->encode(!delivered,frame.id,capture))
+            throw std::runtime_error(encoder->error);
+        frame.view=encoder->input_view;
+        if(frame.id%72==0){
+            const auto us=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-encode_start).count();
+            std::fprintf(stderr,"METEOR_OVR_ENCODE_TIMING frame=%llu copy_convert_encode_us=%lld\n",(unsigned long long)frame.id,(long long)us);std::fflush(stderr);
+        }
+        if(!meteor_steamvr_deliver(frame.id+1,frame.display_ns,config.eye_width,config.eye_height,frame.views.data(),bytes.data(),uint32_t(bytes.size())))
+            throw std::runtime_error("Meteor video delivery failed");
+        delivered=true;++encoded;
+        if(*env("METEOR_OVR_CAPTURE_ACK") && *env("METEOR_PROBE_OUTPUT")){
+            std::ofstream ack(std::filesystem::u8path(env("METEOR_PROBE_OUTPUT"))/"capture-complete");ack<<frame.display_ns;
+        }
+        if(encoded==1 && *env("METEOR_WINDOWS_SESSION_MARKER")){
+            FILE *file=nullptr;if(fopen_s(&file,env("METEOR_WINDOWS_SESSION_MARKER"),"wb")==0)std::fclose(file);
+        }
+    }
+    void run(){
+        for(;;){
+            Frame *frame;
+            {
+                std::unique_lock<std::mutex> lock(queue_mutex);
+                queue_changed.wait(lock,[&]{return stopping || pending;});
+                if(!pending)break;
+                frame=pending;pending=nullptr;
+                queue_changed.notify_all();
+            }
+            try{encode(*frame);}
+            catch(const std::exception &e){
+                std::fprintf(stderr,"METEOR_OVR_FAILURE operation=async_encode error=%s\n",e.what());std::fflush(stderr);
+                failed=true;
+            }
+            {
+                std::lock_guard<std::mutex> lock(queue_mutex);frame->busy=false;
+                if(failed){if(pending)pending->busy=false;pending=nullptr;queue_changed.notify_all();break;}
+            }
+        }
+    }
     template<class T> void symbol(T& f,const char *name){f=reinterpret_cast<T>(GetProcAddress(tracking,name));if(!f)throw std::runtime_error(std::string("Missing tracking export ")+name);}
     void initialize(){
         config.size=sizeof(config);config.version=1;
         config.eye_width=number("METEOR_XR_EYE_SIZE",1280,256,4096,16);
         config.eye_height=number("METEOR_XR_EYE_HEIGHT",1344,256,4096,16);
-        config.refresh_hz=number("XRT_COMPOSITOR_NULL_FPS",72,20,72);
-        if(config.refresh_hz!=20 && config.refresh_hz!=60 && config.refresh_hz!=72)throw std::runtime_error("Unsupported refresh target");
+        config.refresh_hz=number("XRT_COMPOSITOR_NULL_FPS",72,20,90);
+        if(config.refresh_hz!=20 && config.refresh_hz!=60 && config.refresh_hz!=72 && config.refresh_hz!=90)throw std::runtime_error("Unsupported refresh target");
         number("METEOR_XR_DIRECT_PORT",0,1,65535);
         if(!*env("METEOR_XR_DIRECT_PORT"))throw std::runtime_error("A local Meteor video relay is required");
         auto intel=meteor_d3d11_on(nullptr,0x8086);
@@ -66,6 +133,15 @@ struct Session {
         if(!client || !optics(client,config.optics))throw std::runtime_error("Meteor tracking/optics are not ready");
     }
     ~Session(){
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex);stopping=true;
+        }
+        queue_changed.notify_one();
+        if(worker.joinable())worker.join();
+        if(config.refresh_hz==90){
+            std::fprintf(stderr,"METEOR_OVR_ASYNC_DRAIN encoded=%llu failed=%u\n",
+                (unsigned long long)encoded,unsigned(failed.load()));std::fflush(stderr);
+        }
         audio.stop();
         encoder.reset();
         const bool ended=!delivered || meteor_steamvr_finish()!=0;
@@ -134,26 +210,35 @@ extern "C" __declspec(dllexport) int nightfall_ovr_submit_v1(void *raw,void *dev
             uint32_t bitrate=0;if(!meteor_encoder_bitrate(env("METEOR_XR_BITRATE_MBPS"),32000000,&bitrate))throw std::runtime_error("Invalid OVR bitrate");
             s.encoder=std::make_unique<MeteorQsvEncoder>();s.encoder->attach(d3d,s.input.Get(),desc.Width,desc.Height);
             if(!s.encoder->start(!std::strcmp(codec,"h265"),s.config.refresh_hz,bitrate,true))throw std::runtime_error(s.encoder->error);
+            if(s.config.refresh_hz==90){
+                for(auto &slot:s.frames){
+                    gpu_check(d3d->CreateTexture2D(&desc,nullptr,&slot.texture),"Create asynchronous QSV snapshot");
+                }
+                s.worker=std::thread([&s]{s.run();});
+            }
             if(*env("METEOR_XR_AUDIO_PORT") && !s.audio.start(uint16_t(number("METEOR_XR_AUDIO_PORT",0,1,65535)))) {
                 std::fprintf(stderr,"METEOR_OVR_AUDIO startup_failed=1; headset will retain desktop fallback\n");std::fflush(stderr);
             }
         }
         if(s.producer.Get()!=d3d)throw std::runtime_error("OVR producer device changed");
-        const auto encode_start=std::chrono::steady_clock::now();
-        Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;d3d->GetImmediateContext(&context);context->CopyResource(s.input.Get(),source);
-        std::vector<uint8_t> bytes;
-        if(!s.encoder->encode(frame==0,frame,[&](const uint8_t *p,uint32_t n){bytes.assign(p,p+n);return true;}))throw std::runtime_error(s.encoder->error);
-        if(frame%72==0){
-            const auto us=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-encode_start).count();
-            std::fprintf(stderr,"METEOR_OVR_ENCODE_TIMING frame=%llu copy_convert_encode_us=%lld\n",(unsigned long long)frame,(long long)us);std::fflush(stderr);
+        Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;d3d->GetImmediateContext(&context);
+        if(s.config.refresh_hz==90){
+            std::unique_lock<std::mutex> lock(s.queue_mutex);
+            if(!s.queue_changed.wait_for(lock,std::chrono::seconds(5),[&]{return !s.pending || s.failed || s.stopping;}))
+                throw std::runtime_error("Asynchronous encoder queue timed out");
+            if(s.failed || s.stopping)throw std::runtime_error("Asynchronous encoder unavailable");
+            Session::Frame *slot=nullptr;
+            for(auto &candidate:s.frames)if(!candidate.busy){slot=&candidate;break;}
+            if(!slot)throw std::runtime_error("Asynchronous frame pool exhausted");
+            // This copy is submitted before the app may reuse its packed image.
+            context->CopyResource(slot->texture.Get(),source);context->Flush();
+            slot->id=frame;slot->display_ns=display_ns;std::copy_n(views,22,slot->views.begin());slot->busy=true;
+            s.pending=slot;s.queue_changed.notify_one();
+        }else{
+            context->CopyResource(s.input.Get(),source);
+            Session::Frame slot;slot.texture=s.input;slot.view=s.encoder->input_view;
+            slot.id=frame;slot.display_ns=display_ns;std::copy_n(views,22,slot.views.begin());s.encode(slot);
         }
-        if(!meteor_steamvr_deliver(frame+1,display_ns,s.config.eye_width,s.config.eye_height,views,bytes.data(),uint32_t(bytes.size())))throw std::runtime_error("Meteor video delivery failed");
-        s.delivered=true;
-        if(*env("METEOR_OVR_CAPTURE_ACK") && *env("METEOR_PROBE_OUTPUT")){
-            std::ofstream ack(std::filesystem::u8path(env("METEOR_PROBE_OUTPUT"))/"capture-complete");
-            ack<<display_ns;
-        }
-        if(frame==0 && *env("METEOR_WINDOWS_SESSION_MARKER")){FILE *file=nullptr;if(fopen_s(&file,env("METEOR_WINDOWS_SESSION_MARKER"),"wb")==0)std::fclose(file);}
         return 1;
     }catch(const std::exception &e){failure("submit",e);return 0;}
 }
@@ -177,7 +262,7 @@ extern "C" __declspec(dllexport) void nightfall_ovr_close_v1(void *raw){
 extern "C" __declspec(dllexport) uint32_t meteor_encoder_capabilities_v1(char *json,uint32_t size){
     auto device=meteor_d3d11_on(nullptr,0x8086);ArcQsvCapabilities caps{};
     if(!device || arc_qsv_capabilities(device.Get(),&caps)!=0 || !json)return 0;
-    const int n=std::snprintf(json,size,"{\"backend\":\"qsv\",\"audio_pcm\":true,\"codecs\":[%s%s%s],\"max_frame\":[%u,%u]}",
+    const int n=std::snprintf(json,size,"{\"backend\":\"qsv\",\"refresh_rates\":[20,60,72,90],\"audio_pcm\":true,\"codecs\":[%s%s%s],\"max_frame\":[%u,%u]}",
         caps.codecs&1?"\"h264\"":"",caps.codecs==3?",":"",caps.codecs&2?"\"h265\"":"",caps.max_width,caps.max_height);
     return n>0 && uint32_t(n)<size?uint32_t(n):0;
 }

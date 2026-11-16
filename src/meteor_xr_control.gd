@@ -47,6 +47,7 @@ var _relay_config: Dictionary = {}
 
 func _init(node: Node) -> void:
 	owner = node
+	preload("res://src/pcvr_refresh_control.gd").install.call_deferred(owner, self)
 
 static func supported() -> bool:
 	if not ClassDB.class_exists("MeteorChannelCipher"): return false
@@ -542,10 +543,13 @@ func _watch_launch_intent(config: ConfigFile, token: int) -> void:
 func _offer_authenticated(config: ConfigFile, token: int) -> void:
 	_busy = true
 	var quest3: bool = owner.get("device_is_quest3") == true
-	var hz := PCVRVideoSettings.offer_rate(int(config.get_value("host", "hz", 0)), quest3)
 	var eye_size := int(config.get_value("host", "eye_size", 512))
 	var video_settings := PCVRVideoSettings.new(quest3)
 	video_settings.load_from()
+	var hz := PCVRVideoSettings.offer_rate(int(config.get_value("host", "hz", 0)), quest3, video_settings.stream_fps)
+	if hz not in PCVRVideoSettings.host_refresh_rates(encoder_capabilities):
+		_fail("Host does not support %d Hz PCVR; select 72 Hz or update Meteor and its runtime" % hz)
+		return
 	var recommended := PCVRVideoSettings.reference_eye_dimensions(owner.pcvr_test.backend, owner.get("stream_backend"))
 	if video_settings.resolution_percent > 0 and (recommended.x <= 0 or recommended.y <= 0):
 		_fail("Headset OpenXR resolution is not ready")
@@ -556,7 +560,7 @@ func _offer_authenticated(config: ConfigFile, token: int) -> void:
 	_long_run = bool(config.get_value("host", "long_run", false))
 	_handover_on_ready = bool(config.get_value("host", "handover_on_ready", false))
 	_standby_only = bool(config.get_value("host", "standby_only", false)) or _handover_on_ready
-	if hz not in [20, 60, 72] or not PCVRVideoSettings.valid_eye_size(eye_size) or not PCVRVideoSettings.valid_eye_size(eye_height) or (_long_run and hz not in [60, 72]):
+	if hz not in [20, 60, 72, 90] or not PCVRVideoSettings.valid_eye_size(eye_size) or not PCVRVideoSettings.valid_eye_size(eye_height) or (_long_run and hz not in [60, 72, 90]):
 		_fail("Unsupported developer XR rate or eye size")
 		return
 	var configured := await _request({"type": "configure_video", "bitrate_mbps": video_settings.bitrate_mbps, "codec": preferred_codec(quest3), "foveated_encoding":effective_foveation(video_settings.foveated_encoding)}, token)

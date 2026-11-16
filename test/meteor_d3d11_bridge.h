@@ -53,7 +53,7 @@ template<class Encoder> static void meteor_d3d11_bridge_loop(meteor_stereo_encod
     const bool hevc=codec_text && !strcmp(codec_text,"h265");
     const char *rate_text=getenv("XRT_COMPOSITOR_NULL_FPS");
     const uint32_t rate=rate_text ? uint32_t(atoi(rate_text)) : 60;
-    REQUIRE(rate==20 || rate==60 || rate==72,"Unsupported XR encoder rate");
+    REQUIRE(rate==20 || rate==60 || rate==72 || rate==90,"Unsupported XR encoder rate");
     const uint32_t fallback_bitrate=4000000*(width/512)*(height/256);
     uint32_t bitrate_bps=0;
     REQUIRE(meteor_encoder_bitrate(getenv("METEOR_XR_BITRATE_MBPS"),fallback_bitrate,&bitrate_bps),"Invalid XR bitrate");

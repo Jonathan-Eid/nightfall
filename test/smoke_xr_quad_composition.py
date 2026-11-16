@@ -242,7 +242,7 @@ if __name__=="__main__":
     parser.add_argument("--eye-size",type=int,default=256)
     parser.add_argument("--eye-height",type=int)
     parser.add_argument("--foveated",action="store_true")
-    parser.add_argument("--hz",type=int,choices=(20,60,72),default=60)
+    parser.add_argument("--hz",type=int,choices=(20,60,72,90),default=60)
     parser.add_argument("--codec",choices=("h264","h265"),default="h264")
     parser.add_argument("--bitrate",type=int,default=32)
     parser.add_argument("--live-bitrate",action="store_true")

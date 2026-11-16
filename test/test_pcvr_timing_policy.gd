@@ -22,7 +22,7 @@ func _init() -> void:
 	_test_effective_stream_settings()
 	var timing := Policy.new()
 	assert(timing.effective_fps(90) == 90)
-	assert(not timing.begin(90, 120)) # Not a supported transport profile yet.
+	assert(not timing.begin(120, 120)) # Not a supported transport profile.
 	assert(not timing.begin(60, 0))
 	assert(not timing.begin(60, NAN))
 	assert(timing.begin(60, 120))
@@ -39,6 +39,9 @@ func _init() -> void:
 	timing.end()
 	assert(timing.begin(72, 120))
 	assert(timing.stream_fps == 72 and timing.display_hz == 72)
+	timing.end()
+	assert(timing.begin(90, 120))
+	assert(timing.stream_fps == 90 and timing.display_hz == 90)
 	timing.end()
 	print("All pcvr_timing_policy tests passed")
 	quit()

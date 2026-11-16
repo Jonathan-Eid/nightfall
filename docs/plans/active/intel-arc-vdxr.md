@@ -188,6 +188,23 @@ scope preservation; all 12 address validation cases also passed inside the
 Quest app. See the
 [USB PCVR setup and checks](../../guides/meteor-usb-pcvr.md).
 
+The temporary trial firewall was subsequently replaced with the reusable
+`Firewall-UsbLink.ps1` / `UsbLink-Firewall.psm1` policy. It discovers Meta USB
+NCM interfaces, derives exact program paths and ports, and allows link-local
+IPv6 peers on those interfaces without pinning machine/headset addresses.
+The rules persist; repair redetects new/renamed adapters, and uninstall removes
+only that installation's rules. USB mode remains selected if setup fails.
+The stock firewall checker/repair entry point honors the saved USB mode.
+Thirteen policy tests passed, and elevated Windows integration verified
+idempotent install, filter repair, ownership across two install directories
+and removal. On the physical setup the six trial rules and expiry task were
+removed; a fresh USB discovery request succeeded while the Wi-Fi request
+timed out. Installer source includes the option and repair shortcut; compiling
+the updated installer was not validated in this session.
+After reconnecting under the permanent policy, another 3,600-frame scene
+submitted 71.2 FPS, delivered every packet without transport failure and
+acknowledged END.
+
 Motion-to-photon latency, comfort, controller calibration/haptics,
 additional games, other Intel GPUs, Linux Intel, AV1, 90 Hz and conformance
 remain unvalidated.

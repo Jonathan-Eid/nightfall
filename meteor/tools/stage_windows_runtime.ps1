@@ -88,6 +88,8 @@ CopyRequired (Join-Path $PSScriptRoot 'windows-release\Install-SteamVR.ps1') $St
 CopyRequired (Join-Path $PSScriptRoot 'windows-release\SteamVR-Driver.ps1') $Stage
 CopyRequired (Join-Path $PSScriptRoot 'windows-release\Install-VirtualDisplay.ps1') $Stage
 CopyRequired (Join-Path $PSScriptRoot 'windows-release\Firewall-Meteor.ps1') $Stage
+CopyRequired (Join-Path $PSScriptRoot 'windows-release\Firewall-UsbLink.ps1') $Stage
+CopyRequired (Join-Path $PSScriptRoot 'windows-release\UsbLink-Firewall.psm1') $Stage
 CopyRequired (Join-Path $repo 'test\qsv\LICENSE') (Join-Path $licenses 'QSV-LICENSE.txt')
 CopyRequired (Join-Path $repo 'test\qsv\INTEL-LICENSE') (Join-Path $licenses 'oneVPL-LICENSE.txt')
 foreach($component in @(

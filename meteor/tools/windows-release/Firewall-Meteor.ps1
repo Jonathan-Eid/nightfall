@@ -1,6 +1,7 @@
 param(
     [switch]$Remove,
     [switch]$Check,
+    [ValidateSet('Auto','USB','LAN')][string]$NetworkMode='Auto',
     # Meteor's install folder; the script normally sits in it.
     [string]$Root = $PSScriptRoot
 )
@@ -17,6 +18,23 @@ param(
 #   -Check       Print "open" or "blocked: <reason>". No rights needed; Meteor
 #                runs this to tell the user when the Quest can't get through.
 $ErrorActionPreference = 'Stop'
+$usbScript = Join-Path $PSScriptRoot 'Firewall-UsbLink.ps1'
+$usbPolicy = Join-Path $Root 'usb-firewall.json'
+if ($NetworkMode -eq 'USB' -or ($NetworkMode -eq 'Auto' -and (Test-Path -LiteralPath $usbPolicy))) {
+    try {
+        if (-not (Test-Path -LiteralPath $usbScript)) { throw 'USB firewall helper is missing; reinstall Meteor.' }
+        $action = if ($Remove) { 'Remove' } elseif ($Check) { 'Check' } else { 'Install' }
+        $report = & $usbScript -Action $action -Root $Root
+        if ($Check) {
+            if (-not $report.ok) { Write-Output ('blocked: ' + ($report.issues -join '; ')); exit 1 }
+            Write-Output 'open'
+        } else { $report }
+    } catch {
+        if ($Check) { Write-Output ('blocked: ' + $_.Exception.Message); exit 1 }
+        throw
+    }
+    exit 0
+}
 $group = 'Nightfall Meteor'
 $programs = @(
     @{ name = 'Nightfall Meteor'; path = (Join-Path $Root 'nightfall-meteor.exe') },
@@ -75,11 +93,16 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]'Administrat
     $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"")
     if ($Remove) { $arguments += '-Remove' }
     if ($Root -ne $PSScriptRoot) { $arguments += @('-Root', "`"$Root`"") }
-    $process = Start-Process powershell.exe -ArgumentList $arguments -Verb RunAs -Wait -PassThru
+    $arguments += @('-NetworkMode', $NetworkMode)
+    $process = Start-Process powershell.exe -ArgumentList $arguments -Verb RunAs -WindowStyle Hidden -Wait -PassThru
     exit $process.ExitCode
 }
 
-Get-NetFirewallRule -Group $group -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+# Switching modes/uninstalling removes only this installation's USB rules.
+if (Test-Path -LiteralPath $usbScript) { & $usbScript -Action Remove -Root $Root | Out-Null }
+foreach ($program in $programs) {
+    RulesFor $program.path | Where-Object { $_.Group -eq $group } | Remove-NetFirewallRule
+}
 if ($Remove) {
     Write-Host 'Removed the Nightfall Meteor firewall rules.'
     exit 0

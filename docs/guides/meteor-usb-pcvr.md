@@ -9,6 +9,11 @@ and measured results.
 
 ## Connect
 
+For ADB sideloading of a development APK, enable Quest developer mode and USB
+debugging, then authorize the PC in the headset. Meta Quest Developer Hub is
+optional; standalone Android platform-tools work. Nightfall's standalone
+PCVR runtime does not require Meta Dash or a Horizon Link session.
+
 1. Build and install the updated Android client using `BUILD.md`. Preserve an
    existing installation's signing key, or use the separate development
    package from the export preset. Do not uninstall to bypass a signature
@@ -22,9 +27,10 @@ and measured results.
    that value to `[::]:47910` and restart Meteor. Binding a specific USB
    address also needs its Windows interface index and requires the adapter
    to exist when Meteor starts.
-4. Allow the required traffic through Windows Firewall on the USB interface.
-   Use rules scoped to the exact program, interface, current network profile,
-   PC USB IPv6 address and Quest USB IPv6 address. Do not disable the firewall.
+4. Install the persistent USB firewall policy described below. The Windows
+   installer offers **Restrict firewall access to Quest USB Link**; portable
+   users can run the same helper from the extracted host folder. It does not
+   depend on either device's IP address.
 5. Select or pair the PC over its USB address. If automatic discovery does not
    find it, use its link-local IPv6 address with the Quest-side zone `%usb0`,
    for example `fe80::1234%usb0`. The PC's numeric interface index belongs on
@@ -33,8 +39,70 @@ and measured results.
    Keep the same resolution, bitrate and refresh rate when comparing USB
    with Wi-Fi.
 
-The test used these default ports; custom host base ports change the proxy
-ports. Restrict inbound rules by program as well as by the ports below.
+## Install, repair and remove the USB firewall policy
+
+Run this from the extracted Meteor host folder containing
+`nightfall-meteor.exe`, `runtime/host/sunshine.exe`, `Firewall-UsbLink.ps1` and
+`UsbLink-Firewall.psm1`. Connect the Quest and enable Nightfall USB Link first:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Firewall-UsbLink.ps1
+```
+
+Accept Windows UAC once. The rules are persistent and have no expiry task.
+The helper detects **Meta USB devices using the UsbNcm driver**, independently
+of a localized adapter name or a fixed interface index. Each rule combines:
+
+- the full installed path of Meteor or its bundled host;
+- the detected USB adapter names, matched literally;
+- the exact TCP/UDP port list;
+- IPv6 link-local source and destination addresses (`fe80::/10`);
+- blocked edge traversal.
+
+Rules apply to all Windows network profiles **on those USB interfaces only**,
+so switching the USB adapter between Public and Private does not break Link.
+They do not allow Wi-Fi, Ethernet LAN, routed peers or arbitrary ports. A new
+headset's link-local IP needs no rule update. If Windows creates a new adapter
+for that headset, or an adapter is renamed, use **Repair Nightfall USB Link**
+from Start, or rerun:
+
+```powershell
+.\Firewall-UsbLink.ps1 -Action Repair
+```
+
+Repair redetects adapters and updates the same three rules. It does not add
+duplicates or ask for IP addresses. A failed setup retains USB mode so the
+tray's firewall repair cannot silently replace it with LAN allowances.
+`usb-firewall.json` stores the USB choice and port options beside the installed
+program; it contains no PC/headset IP, serial number, saved adapter name or
+pairing secret. Do not manually copy keys or host pairing state between PCs.
+
+The following commands need no administrator rights:
+
+```powershell
+.\Firewall-UsbLink.ps1 -Action Plan  | ConvertTo-Json -Depth 8
+.\Firewall-UsbLink.ps1 -Action Check | ConvertTo-Json -Depth 5
+```
+
+Remove just this installation's USB rules with:
+
+```powershell
+.\Firewall-UsbLink.ps1 -Action Remove
+```
+
+The Windows uninstaller performs that removal automatically and preserves
+headset pairing data. Separate install folders have separate rule identities;
+removing one does not remove another's rules. Additional firewall allowances
+created manually or by other software remain separate and should be reviewed
+if a USB-only policy is required. Managed firewall/GPO block rules are not
+overridden.
+
+For custom ports, pass `-HostHttpPort`, `-ProxyOffset`, `-ControlPort`,
+`-VideoPort` and `-TrackingPort` matching Meteor's settings. The helper saves
+them for repair and validates derived port ranges/overlaps. Depth and
+microphone ports are opt-in with `-EnableDepth` and `-EnableMicrophone`.
+
+The defaults are:
 
 | Program | Protocol | Local ports | Purpose |
 | --- | --- | --- | --- |
@@ -43,10 +111,28 @@ ports. Restrict inbound rules by program as well as by the ports below.
 | bundled `sunshine.exe` | TCP | 47984, 47989 | Initial host pairing and host API |
 
 These cover the tested path with microphone/depth disabled. Discovery via
-mDNS can require separate, equally scoped multicast permissions; entering
-the USB address avoids relying on mDNS. Test rules should have a documented
-expiry or removal procedure. The physical trial's temporary rules were
-scheduled for removal at the end of the test window.
+mDNS can require separate multicast permissions; entering the USB address
+avoids relying on mDNS. The helper does not modify Windows' system-wide mDNS
+rules. The earlier per-IP trial rules and their cleanup timer are superseded
+by this persistent installer-managed policy.
+
+The source installer now includes the USB option, helper and repair shortcut.
+An updated compiled installer has not been validated in this development
+session; the portable helper commands above were tested directly on Windows.
+
+## Development checks
+
+```powershell
+Invoke-Pester .\test\test_windows_usb_firewall.ps1
+# Elevated; creates inert fixture programs and removes every fixture rule:
+.\test\check_windows_usb_firewall.ps1 -Result C:\path\to\usb-firewall-result.json
+```
+
+The policy suite covers differing install locations, adapter names, multiple
+headsets, custom ports and absent USB hardware. The Windows integration check
+installs twice without duplication, detects and repairs changed filters,
+isolates two installations, and verifies uninstall cleanup. It does not run
+the fixture executables or change the real installation's rules.
 
 ## Verify the route
 

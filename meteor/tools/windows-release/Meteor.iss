@@ -39,6 +39,7 @@ WizardStyle=modern
 Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked
 Name: "builtinhost"; Description: "Use Meteor's built-in desktop streaming host"
 Name: "pcvr"; Description: "Set up PCVR for installed games"
+Name: "usblink"; Description: "Restrict firewall access to Quest USB Link (connect the Quest and enable Nightfall USB Link first)"; Flags: unchecked
 Name: "vda"; Description: "Download VDA depth model on first launch (requires NVIDIA GPU, ~500 MB downloaded in background)"
 Name: "virtualmonitors"; Description: "Install virtual display driver for virtual monitors in VR (requires admin, ~1 MB)"
 
@@ -63,6 +64,8 @@ Source: "{#Stage}\Install-SteamVR.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Stage}\SteamVR-Driver.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Stage}\Install-VirtualDisplay.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Stage}\Firewall-Meteor.ps1"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Stage}\Firewall-UsbLink.ps1"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Stage}\UsbLink-Firewall.psm1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Stage}\runtime\*"; DestDir: "{app}\runtime"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#Stage}\share\doc\nightfall-meteor\runtime\*"; DestDir: "{app}\share\doc\nightfall-meteor\runtime"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#Stage}\share\nightfall-meteor\models\*"; DestDir: "{app}\share\nightfall-meteor\models"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -74,6 +77,7 @@ Source: "{#Stage}\share\doc\nightfall-meteor\THIRD_PARTY_NOTICES.txt"; DestDir: 
 Name: "{group}\Nightfall Meteor"; Filename: "{app}\nightfall-meteor.exe"; WorkingDir: "{app}"
 Name: "{group}\Pair a Nightfall headset"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\Pair-Headset.ps1"""; WorkingDir: "{app}"
 Name: "{group}\Set up Nightfall Meteor"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Setup-Meteor.ps1"" -EnableHost -EnablePCVR"; WorkingDir: "{app}"
+Name: "{group}\Repair Nightfall USB Link"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Firewall-UsbLink.ps1"" -Action Repair"; WorkingDir: "{app}"
 Name: "{group}\Uninstall Nightfall Meteor"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\Nightfall Meteor"; Filename: "{app}\nightfall-meteor.exe"; WorkingDir: "{app}"; Tasks: desktopicon
 
@@ -103,7 +107,7 @@ var
 begin
   Path := ExpandConstant('{app}\' + Name);
   StringChangeEx(Path, '''', '''''', True);
-  Result := 'try { & ''' + Path + '''' + Args + ' } catch { Write-Warning $_ }; ';
+  Result := 'try { & ''' + Path + '''' + Args + ' } catch { $script:NightfallSetupFailed = $true; Write-Warning $_ }; ';
 end;
 
 // Quits every program running from {app}: Meteor, its host and helpers. The
@@ -135,9 +139,13 @@ var
   ResultCode: Integer;
 begin
   if Commands = '' then Exit;
-  ShellExec('runas', ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
-    '-NoProfile -ExecutionPolicy Bypass -Command "' + Commands + '"',
-    ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  if not ShellExec('runas', ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+    '-NoProfile -ExecutionPolicy Bypass -Command "$script:NightfallSetupFailed = $false; ' + Commands +
+      'if ($script:NightfallSetupFailed) { exit 1 }"',
+    ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    ResultCode := 1;
+  if ResultCode <> 0 then
+    MsgBox('Some system setup steps could not finish. For USB Link, connect the Quest, enable USB Link in Nightfall, then use Repair Nightfall USB Link from Start.', mbInformation, MB_OK);
 end;
 
 // Everything that needs administrator rights, in one elevated PowerShell so
@@ -149,7 +157,10 @@ var
   Commands: String;
 begin
   if CurStep <> ssPostInstall then Exit;
-  Commands := AppScript('Firewall-Meteor.ps1', '');
+  if WizardIsTaskSelected('usblink') then
+    Commands := AppScript('Firewall-Meteor.ps1', ' -NetworkMode USB')
+  else
+    Commands := AppScript('Firewall-Meteor.ps1', '');
   if WizardIsTaskSelected('virtualmonitors') then
     Commands := Commands + AppScript('Install-VirtualDisplay.ps1', '');
   RunElevated(Commands);

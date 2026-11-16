@@ -385,3 +385,49 @@ deterministic small NV12 fixture and does not record the desktop. The headset
 test APK remains a diagnostic repack with a source-built XR addon and preserved
 baseline engine/core libraries; this is not a validated full APK/installer release.
 
+## Peripheral coverage and DX12 game validation — November 16, 2026
+
+The `dx12` branch of `WetCatClub/20xolovr` now has a native D3D12 renderer.
+Actual OpenXR readbacks originally reproduced an empty right eye and inverted
+text. Separate per-eye draws fixed those failures; the wearer confirmed the
+corrected picture, then reported black edges during head turns. The game still
+feeds this bridge's existing D3D11/QSV encoder path.
+
+The OVR bridge now expands the headset's FOV tangents by 1.15 before publishing
+its render configuration. Eye poses and asymmetric lens geometry are preserved.
+The expanded FOV drives the application cameras, host compositor, and streamed
+projection metadata together; widening receiver metadata alone would distort
+the image. This renders extra peripheral content for rotational reprojection.
+It does not predict tracking, remove transport latency, or prevent every edge
+exposure during fast motion.
+
+`METEOR_XR_FOV_SCALE` overrides the margin for a launched game. Accepted values
+are 1.0 through 1.4; 1.15 is the default. For example, put
+`$env:METEOR_XR_FOV_SCALE = '1.20'` in a PowerShell game launcher **before** it
+starts the executable, then restart that VR session. 1.0 preserves the original
+FOV exactly. Larger margins reduce angular pixel density at a fixed stream
+resolution; increase resolution separately if sharpness and GPU budget allow.
+This is a host launch option, not yet a headset menu setting.
+
+On the physical Quest 2, the wearer confirmed that 1.15 improves coverage.
+A 29.56-second sample of the DX12 training scene at the saved 75% resolution
+(1376×1440 per eye, H.264, USB, 90 Hz) measured 89.83 received frames/s and
+89.25 new projection copies/s. These counters measure delivery, not physical
+scanout or motion-to-photon latency. The scene is simpler than Open Brush;
+this result does not resolve Open Brush's earlier 74–81 FPS limit.
+
+At the same 1.15 margin, 100% resolution (1840×1920 per eye) measured 77.43
+received frames/s and 77.23 new projection copies/s over 29.51 seconds.
+85% (1568×1632 per eye) measured 89.80 received frames/s and 88.87 new copies/s
+over 24.60 seconds, and was retained for this game. Those two runs disabled eye
+readbacks. All three runs are sequential short samples, not controlled
+benchmarks or a guarantee for heavier scenes. The saved preference remains
+90 Hz; increasing resolution does not increase the rendered field of view.
+
+Validation includes the native asymmetric-FOV/pose-preservation/invalid-input
+test, a 12-frame 90 Hz decoded quad geometry/alpha/eye-visibility test with the
+1.15 margin, a 24-frame 90 Hz stereo frame-identity/preflight test with the margin,
+and a 12-frame 72 Hz quad check with explicit 1.0 compatibility. All delivered
+clean END. `test/smoke_windows_vdxr.py --fov-scale 1.15` selects the expanded
+reference geometry; its default 1.0 keeps historical fixtures unchanged.
+

@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.21)
 project(meteor_ovr_bridge LANGUAGES C CXX)
+add_executable(meteor-projection-margin-test ../test_projection_margin.cpp)
+target_compile_features(meteor-projection-margin-test PRIVATE cxx_std_17)
+target_compile_options(meteor-projection-margin-test PRIVATE /UNDEBUG)
 add_subdirectory(../qsv qsv)
 add_library(meteor-ovr-bridge SHARED bridge.cpp ../steamvr-driver/transport.c)
 target_compile_features(meteor-ovr-bridge PRIVATE cxx_std_17 c_std_11)

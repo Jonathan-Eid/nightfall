@@ -28,11 +28,14 @@ def main():
     parser.add_argument('--codec', choices=['h264', 'h265'], default='h264')
     parser.add_argument('--frames', type=int, default=24)
     parser.add_argument('--hz', type=int, choices=[60,72,90], default=72)
+    parser.add_argument('--fov-scale', type=float, default=1.0, help='Tangent-space render margin (1..1.4)')
     parser.add_argument('--quad', action='store_true')
     parser.add_argument('--frame-ids', action='store_true', help='Verify a changing per-frame color in both decoded eyes')
     parser.add_argument('--gpu', action='store_true', help='Use the GPU performance probe wrapper')
     parser.add_argument('--preflight', action='store_true', help='Destroy a device-detection instance before the actual VR instance')
     args = parser.parse_args()
+    if not math.isfinite(args.fov_scale) or not 1 <= args.fov_scale <= 1.4:
+        parser.error('fov-scale must be 1..1.4')
     if args.quad and args.gpu:
         parser.error('--quad pixel-reference checks and --gpu measurement are separate fixtures')
     if args.frame_ids and (args.quad or args.gpu):
@@ -58,6 +61,7 @@ def main():
         'METEOR_TRACKING_PORT': str(tracking_port), 'METEOR_XR_DIRECT_PORT': str(video_port),
         'METEOR_XR_CONTROLLERS': '1', 'METEOR_XR_TOUCH_INPUTS': '1', 'METEOR_XR_HAPTICS': '1',
         'METEOR_XR_HEADSET_OPTICS': '1', 'METEOR_XR_TRACKED_SCENE': '1',
+        'METEOR_XR_FOV_SCALE': str(args.fov_scale),
         'METEOR_XR_EYE_SIZE': '1280', 'METEOR_XR_EYE_HEIGHT': '1344',
         'XRT_COMPOSITOR_NULL_FPS': str(args.hz), 'METEOR_XR_CODEC': args.codec, 'METEOR_XR_BITRATE_MBPS': '32',
         'METEOR_PROBE_OUTPUT': str(out), 'METEOR_OVR_CAPTURE_ACK': '1',
@@ -73,6 +77,7 @@ def main():
     result = {'success': False, 'synthetic_tracking': True, 'gpu_measurement': args.gpu, 'codec': args.codec, 'target_hz':args.hz,
               'dimensions': [2560, 1344], 'requested_frames': args.frames, 'quad': args.quad,
               'preflight': args.preflight, 'frame_ids': args.frame_ids}
+    result['fov_scale'] = args.fov_scale
 
     def start(name, command):
         stdout, stderr = out / (name + '.out'), out / (name + '.err')
@@ -163,8 +168,8 @@ def main():
 
             def pixel(eye, x):
                 left, right, offset = (.8, .7, -.032) if eye == 0 else (.7, .8, .032)
-                px = round((math.tan(left) + (x - offset) / 2) / (math.tan(left) + math.tan(right)) * 1280)
-                py = round((math.tan(.75) - .6 / 2) / (math.tan(.75) + math.tan(.65)) * 1344)
+                px = round((math.tan(left) * args.fov_scale + (x - offset) / 2) / ((math.tan(left) + math.tan(right)) * args.fov_scale) * 1280)
+                py = round((math.tan(.75) * args.fov_scale - .6 / 2) / ((math.tan(.75) + math.tan(.65)) * args.fov_scale) * 1344)
                 start = py * plane.line_size + (eye * 1280 + px) * 3
                 return tuple(pixels[start:start + 3])
 

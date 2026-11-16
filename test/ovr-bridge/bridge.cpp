@@ -13,6 +13,7 @@
 #include "nightfall_abi.h"
 #include "../meteor_qsv_encoder.h"
 #include "../meteor_encoder_bitrate.h"
+#include "../meteor_projection_margin.h"
 #include "../steamvr-driver/transport.h"
 #include "../meteor_windows_audio_transport.h"
 
@@ -131,6 +132,12 @@ struct Session {
         symbol(connected,"meteor_tracking_connected_v1");
         client=start(env("METEOR_TRACKING_PORT"));
         if(!client || !optics(client,config.optics))throw std::runtime_error("Meteor tracking/optics are not ready");
+        float fov_scale=1;
+        if(!meteor_projection_margin(env("METEOR_XR_FOV_SCALE"),config.optics,&fov_scale))
+            throw std::runtime_error("Invalid METEOR_XR_FOV_SCALE (expected 1..1.4) or headset FOV");
+        std::fprintf(stderr,"METEOR_RENDER_FOV scale=%.3f left=%.6f,%.6f,%.6f,%.6f right=%.6f,%.6f,%.6f,%.6f\n",
+            fov_scale,config.optics[7],config.optics[8],config.optics[9],config.optics[10],
+            config.optics[18],config.optics[19],config.optics[20],config.optics[21]);std::fflush(stderr);
     }
     ~Session(){
         {

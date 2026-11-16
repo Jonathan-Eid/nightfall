@@ -28,10 +28,14 @@ def main():
     parser.add_argument('--codec', choices=['h264', 'h265'], default='h264')
     parser.add_argument('--frames', type=int, default=24)
     parser.add_argument('--quad', action='store_true')
+    parser.add_argument('--frame-ids', action='store_true', help='Verify a changing per-frame color in both decoded eyes')
     parser.add_argument('--gpu', action='store_true', help='Use the GPU performance probe wrapper')
+    parser.add_argument('--preflight', action='store_true', help='Destroy a device-detection instance before the actual VR instance')
     args = parser.parse_args()
     if args.quad and args.gpu:
         parser.error('--quad pixel-reference checks and --gpu measurement are separate fixtures')
+    if args.frame_ids and (args.quad or args.gpu):
+        parser.error('--frame-ids requires the plain stereo pattern')
     if not 1 <= args.frames <= 240:
         parser.error('frames must be 1..240')
     build, runtime, out = args.build.resolve(), args.runtime.resolve(), args.output.resolve()
@@ -43,7 +47,7 @@ def main():
     # Clear fixture flags that might otherwise change the test's composition contract.
     for key in ['METEOR_XR_QUAD_FIXTURE', 'METEOR_XR_PANORAMA_FIXTURE', 'METEOR_XR_CYLINDER_FIXTURE',
                 'METEOR_XR_STACK_FIXTURE', 'METEOR_XR_GPU_SCENE_SHADER', 'METEOR_XR_GPU_MEASURE',
-                'METEOR_PROBE_HOLD_MS']:
+                'METEOR_PROBE_HOLD_MS', 'METEOR_XR_PREFLIGHT']:
         env.pop(key, None)
     env.update({
         'XR_RUNTIME_JSON': str(runtime / 'virtualdesktop-openxr.json'),
@@ -60,9 +64,14 @@ def main():
     })
     if args.quad:
         env['METEOR_XR_QUAD_FIXTURE'] = '1'
+    if args.preflight:
+        env['METEOR_XR_PREFLIGHT'] = '1'
+    if args.frame_ids:
+        env.pop('METEOR_XR_TRACKED_SCENE', None)
     children, files = [], []
     result = {'success': False, 'synthetic_tracking': True, 'gpu_measurement': args.gpu, 'codec': args.codec,
-              'dimensions': [2560, 1344], 'requested_frames': args.frames, 'quad': args.quad}
+              'dimensions': [2560, 1344], 'requested_frames': args.frames, 'quad': args.quad,
+              'preflight': args.preflight, 'frame_ids': args.frame_ids}
 
     def start(name, command):
         stdout, stderr = out / (name + '.out'), out / (name + '.err')
@@ -105,8 +114,39 @@ def main():
         result['clean_end'] = 'frames and clean END through Meteor wire validator' in wire
         if result['validated_frames'] != args.frames or not result['clean_end']:
             raise RuntimeError('Incomplete frame delivery or missing END acknowledgement')
-        if 'Tracked center=0.250000,0.500000,-0.750000' not in (out / 'probe.out').read_text():
+        expected_center = 'Tracked center=0.250000,-1.175000,-0.750000' if args.frame_ids else 'Tracked center=0.250000,0.500000,-0.750000'
+        if expected_center not in (out / 'probe.out').read_text():
             raise RuntimeError('OpenXR tracking-space conversion did not preserve the fixture floor pose')
+        if args.frame_ids:
+            # A static scene cannot reveal an old swapchain image being paired
+            # with the current frame's pose. Check every changing image in both
+            # eyes, including startup and wraparound of the three-image ring.
+            import av
+
+            def srgb(value):
+                linear = value / 255
+                return round(255 * (12.92 * linear if linear <= .0031308 else 1.055 * linear ** (1 / 2.4) - .055))
+
+            measurements = []
+            with av.open(str(out / ('stream.' + args.codec))) as capture:
+                for frame_id, frame in enumerate(capture.decode(video=0)):
+                    rgb = frame.reformat(format='rgb24')
+                    plane = rgb.planes[0]
+                    pixels = bytes(plane)
+                    eyes = []
+                    for eye in range(2):
+                        x, y = eye * 1280 + 320, 336
+                        start = y * plane.line_size + x * 3
+                        eyes.append(list(pixels[start:start + 3]))
+                    green = srgb((frame_id * 73) % 256)
+                    expected = [[255, green, 0], [0, green, 255]]
+                    measurements.append({'frame': frame_id, 'expected': expected, 'decoded': eyes,
+                                         'match': all(abs(actual - want) <= 8 for colors, reference in zip(eyes, expected)
+                                                      for actual, want in zip(colors, reference))})
+            result['frame_id_measurements'] = measurements
+            if len(measurements) != args.frames or not all(item['match'] for item in measurements):
+                raise RuntimeError('Decoded image identity does not match its submitted frame; see frame_id_measurements')
+            result['stereo_frame_ids_verified'] = True
         if args.quad:
             # Packet delivery can pass while a broken compositor draws black.
             # PyAV is a test-only dependency for checking the actual bitstream.
@@ -148,7 +188,7 @@ def main():
         for handle in files:
             handle.close()
         (out / 'summary.json').write_text(json.dumps(result, indent=2))
-    print(json.dumps(result))
+    print(json.dumps({key: value for key, value in result.items() if key != 'frame_id_measurements'}))
     return 0 if result['success'] else 1
 
 

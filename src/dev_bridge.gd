@@ -422,20 +422,22 @@ func state() -> Dictionary:
 # "settings.host.stream_fps". Dev builds only, like the rest of this.
 func evaluate(text: String) -> Dictionary:
 	var expression := Expression.new()
-	if expression.parse(text) != OK:
+	# Expression does not resolve GDScript's global singleton identifiers.
+	# Expose timing counters for frame-pacing experiments on dev builds.
+	if expression.parse(text, PackedStringArray(["Engine", "Time", "XRServer"])) != OK:
 		return {"ok": false, "error": expression.get_error_text()}
-	var value = expression.execute([], main, false)
+	var value = expression.execute([Engine, Time, XRServer], main, false)
 	if expression.has_execute_failed():
 		return {"ok": false, "error": expression.get_error_text()}
 	return {"ok": true, "value": _json_safe(value)}
 
 func wait_for(text: String, timeout: float) -> Dictionary:
 	var expression := Expression.new()
-	if expression.parse(text) != OK:
+	if expression.parse(text, PackedStringArray(["Engine", "Time", "XRServer"])) != OK:
 		return {"ok": false, "error": expression.get_error_text()}
 	var start := Time.get_ticks_msec()
 	while Time.get_ticks_msec() - start < int(timeout * 1000.0):
-		var value = expression.execute([], main, false)
+		var value = expression.execute([Engine, Time, XRServer], main, false)
 		if not expression.has_execute_failed() and value:
 			return {"ok": true, "value": _json_safe(value), "waited_s": _round((Time.get_ticks_msec() - start) / 1000.0)}
 		await get_tree().process_frame

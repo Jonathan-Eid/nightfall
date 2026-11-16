@@ -38,6 +38,8 @@ public:
 	void _on_instance_destroyed() override;
 	void stop_test();
 	Dictionary get_test_status() const;
+	bool set_meteor_decoder_poll_ms(int p_interval);
+	bool set_meteor_frame_buffering(bool p_enabled);
 	void set_wristwatch(PackedFloat32Array p_state);
 	void set_workspace_input_focus(bool p_focused);
 	bool set_meteor_eye_size(int p_size);

@@ -46,6 +46,12 @@ echo "Building pcvr_frame_accounting_test"
   -I"$PROJECT_ROOT/extensions/nightfall-xr/include" \
   -o "$BUILD_ROOT/pcvr_frame_accounting_test"
 "$BUILD_ROOT/pcvr_frame_accounting_test"
+echo "Building pcvr_latency_histogram_test"
+"$CXX" -std=c++17 -Wall -Wextra -Werror -pthread \
+  "$PROJECT_ROOT/test/pcvr_latency_histogram_test.cpp" \
+  -I"$PROJECT_ROOT/extensions/nightfall-xr/include" \
+  -o "$BUILD_ROOT/pcvr_latency_histogram_test"
+"$BUILD_ROOT/pcvr_latency_histogram_test"
 echo "Building pcvr_view_validation_test"
 "$CXX" -std=c++17 -Wall -Wextra -Werror \
   "$PROJECT_ROOT/test/pcvr_view_validation_test.cpp" \

@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <mutex>
 #include <fstream>
+#include <chrono>
 #include "nightfall_abi.h"
 #include "../meteor_qsv_encoder.h"
 #include "../meteor_encoder_bitrate.h"
@@ -73,9 +74,33 @@ struct Session {
     }
 };
 void failure(const char *operation,const std::exception &e){std::fprintf(stderr,"METEOR_OVR_FAILURE operation=%s error=%s\n",operation,e.what());std::fflush(stderr);}
+// Unity may create/destroy an instance while detecting devices, before its
+// actual game instance. Preserve only a never-submitted backend across that
+// bootstrap gap. It has no encoder, submitted GPU texture or video epoch yet.
+// A temporary DLL reference keeps the worker/code alive between OVR drivers.
+// The raw pending pointer is deliberately not destroyed under Windows loader
+// lock at process detach; process exit owns cleanup if startup never completes.
+std::mutex bootstrap_mutex;
+Session *bootstrap_session=nullptr;
+HMODULE bootstrap_module=nullptr;
 }
 extern "C" __declspec(dllexport) void *nightfall_ovr_open_v1(NightfallOvrConfigV1 *config){
-    try{if(!config || config->size!=sizeof(*config))return nullptr;auto s=std::make_unique<Session>();s->initialize();*config=s->config;return s.release();}
+    try{
+        if(!config || config->size!=sizeof(*config))return nullptr;
+        std::unique_ptr<Session> s;
+        HMODULE hold=nullptr;
+        {
+            std::lock_guard<std::mutex> lock(bootstrap_mutex);
+            s.reset(bootstrap_session);bootstrap_session=nullptr;
+            hold=bootstrap_module;bootstrap_module=nullptr;
+        }
+        // The caller owns its ordinary LoadLibrary reference during this call.
+        if(hold)FreeLibrary(hold);
+        if(s && !s->connected(s->client))s.reset();
+        if(!s){s=std::make_unique<Session>();s->initialize();}
+        else{std::fprintf(stderr,"METEOR_OVR_BOOTSTRAP_REUSED\n");std::fflush(stderr);}
+        *config=s->config;return s.release();
+    }
     catch(const std::exception &e){failure("open",e);return nullptr;}
 }
 extern "C" __declspec(dllexport) int nightfall_ovr_sample_v1(void *raw,int64_t at,NightfallOvrStateV1 *state){
@@ -108,9 +133,14 @@ extern "C" __declspec(dllexport) int nightfall_ovr_submit_v1(void *raw,void *dev
             if(!s.encoder->start(!std::strcmp(codec,"h265"),s.config.refresh_hz,bitrate,true))throw std::runtime_error(s.encoder->error);
         }
         if(s.producer.Get()!=d3d)throw std::runtime_error("OVR producer device changed");
+        const auto encode_start=std::chrono::steady_clock::now();
         Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;d3d->GetImmediateContext(&context);context->CopyResource(s.input.Get(),source);
         std::vector<uint8_t> bytes;
         if(!s.encoder->encode(frame==0,frame,[&](const uint8_t *p,uint32_t n){bytes.assign(p,p+n);return true;}))throw std::runtime_error(s.encoder->error);
+        if(frame%72==0){
+            const auto us=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-encode_start).count();
+            std::fprintf(stderr,"METEOR_OVR_ENCODE_TIMING frame=%llu copy_convert_encode_us=%lld\n",(unsigned long long)frame,(long long)us);std::fflush(stderr);
+        }
         if(!meteor_steamvr_deliver(frame+1,display_ns,s.config.eye_width,s.config.eye_height,views,bytes.data(),uint32_t(bytes.size())))throw std::runtime_error("Meteor video delivery failed");
         s.delivered=true;
         if(*env("METEOR_OVR_CAPTURE_ACK") && *env("METEOR_PROBE_OUTPUT")){
@@ -124,7 +154,20 @@ extern "C" __declspec(dllexport) int nightfall_ovr_submit_v1(void *raw,void *dev
 extern "C" __declspec(dllexport) int nightfall_ovr_haptic_v1(void *raw,uint32_t hand,float amplitude,int64_t duration){
     if(!raw || hand>1)return 0;return static_cast<Session*>(raw)->haptic(hand,amplitude,duration);
 }
-extern "C" __declspec(dllexport) void nightfall_ovr_close_v1(void *raw){delete static_cast<Session*>(raw);}
+extern "C" __declspec(dllexport) void nightfall_ovr_close_v1(void *raw){
+    auto *s=static_cast<Session*>(raw);
+    if(!s)return;
+    if(!s->delivered && !s->encoder && !s->producer && !s->input && s->client && s->connected(s->client)){
+        std::lock_guard<std::mutex> lock(bootstrap_mutex);
+        HMODULE hold=nullptr;
+        if(!bootstrap_session && GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                reinterpret_cast<LPCWSTR>(&nightfall_ovr_close_v1),&hold)){
+            bootstrap_session=s;bootstrap_module=hold;
+            return;
+        }
+    }
+    delete s;
+}
 extern "C" __declspec(dllexport) uint32_t meteor_encoder_capabilities_v1(char *json,uint32_t size){
     auto device=meteor_d3d11_on(nullptr,0x8086);ArcQsvCapabilities caps{};
     if(!device || arc_qsv_capabilities(device.Get(),&caps)!=0 || !json)return 0;

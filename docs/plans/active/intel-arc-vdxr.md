@@ -209,3 +209,68 @@ Motion-to-photon latency, comfort, controller calibration/haptics,
 additional games, other Intel GPUs, Linux Intel, AV1, 90 Hz and conformance
 remain unvalidated.
 
+### Open Brush pacing and motion artifacts, November 16
+
+The separate Quest test package now also contains a source-built
+`nightfall-xr` extension. Its Godot engine and other native libraries still
+come from the existing APK; this remains a diagnostic repack, not a full
+Android source build. Pairing and the stock package were preserved.
+
+The decoder polls output while waiting on the video socket at 1 ms rather
+than 10 ms. ImageReader acquisition uses FIFO with a two-refresh-period
+receipt-age limit and catches up to the newest image after a stall. The
+MediaCodec Surface has automatic frame dropping disabled so it cannot
+silently discard queued images before FIFO acquisition. The GL acquire and
+copy fences remain nonblocking on the rendering thread. Local monotonic
+histograms measure receipt, codec output and image selection; they do not
+measure photons or compare unsynchronized PC/Quest clocks.
+
+Open Brush 2.32.0 exposed Unity's preliminary device-detection instance.
+The bridge now retains a connected, never-submitted tracking backend across
+that bootstrap gap, without retaining an encoder or submitted texture.
+The Nightfall runtime omits unsupported depth/audio extensions and retains
+its session when transitioning from headless detection. Asynchronous layer
+submission, a first-tick readiness handshake and deferred frame waiting let
+application rendering overlap the previous encode. D3D11 commands are flushed
+before waiting for the submission worker. QSV still waits for GPU completion
+before importing its NV12 surface, using a D3D11 fence/event instead of CPU
+polling. Timestamp queries measured conversion itself at about 40 microseconds
+in one trial; most of that stage's wait was preceding application GPU work.
+
+At 2752×1440 H.264/32 Mbps/72 Hz, a 21-second Open Brush sample reached
+70.7 projection copies per second with a 15 ms cumulative p95 selection
+interval. A subsequent 120-second sample fell to 49.3 copies per second,
+while the client loop remained near 71.8 Hz. Those sequential, uncontrolled
+samples are evidence of remaining workload/pacing variability, not stable
+72 FPS. Reducing the PC mirror to 640×360 left the headset resolution intact.
+The user reported smoother movement but doubling while turning their head.
+
+A changing stereo pattern then reproduced a host compositor bug that static
+geometry tests missed: OVRNull returned the previous writable image index
+instead of the next one in its three-image ring. Both eyes' encoded pixels
+lagged their submitted frame identity by one frame, while metadata described
+the current render pose. The first image was black. The corrected index is
+`(lastCommittedIndex + 1) % length`; static single-image chains still return
+zero. All 12 images failed the new identity check before the correction;
+24/24 H.264 images in both eyes passed afterwards, including startup and
+ring wraparound, with the device-detection preflight enabled. A separate
+24-frame HEVC identity test and the H.264 quad geometry/alpha/eye-visibility
+test passed with the corrected index.
+
+Repeat the decoded-image regression with:
+
+```powershell
+python test/smoke_windows_vdxr.py --runtime C:\path\to\vdxr\bin\x64\Release `
+    --build build/arc --output build/arc/frame-identity-new --frames 24 --frame-ids --preflight
+```
+
+This requires the test-only `av` package. The report includes per-frame
+expected/decoded RGB values from both eyes. The corrected build was relaunched
+in Open Brush. The user confirmed the doubling was gone while turning their
+head. A subsequent 45-second sample averaged 40.7 projection copies per second;
+sustained gameplay performance remains unfinished. A fresh Open Brush session
+then averaged 66.2 copies per second over 77.6 seconds at the same settings.
+This variation is why the faster short sample is not a stable-rate claim.
+ALVR comparison was stopped at the user's
+request and its temporary settings/driver registration were restored.
+

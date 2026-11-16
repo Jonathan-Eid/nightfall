@@ -102,6 +102,10 @@ func _initialize() -> void:
 
 	reply = await bridge.handle({"cmd": "eval", "expr": "ui_viewport.size.x * 2"})
 	assert(reply["ok"] and reply["value"] == 800, str(reply))
+	reply = await bridge.handle({"cmd": "eval", "expr": "[Engine.max_fps, Time.get_ticks_usec(), XRServer.get_interfaces().size()]"})
+	assert(reply["ok"] and reply["value"][1] > 0, str(reply))
+	reply = await bridge.handle({"cmd": "wait", "expr": "Engine.get_process_frames() > 0", "timeout": 0.1})
+	assert(reply["ok"], str(reply))
 	reply = await bridge.handle({"cmd": "eval", "expr": "no_such_thing("})
 	assert(not reply["ok"])
 	reply = await bridge.handle({"cmd": "wait", "expr": "is_streaming", "timeout": 0.1})

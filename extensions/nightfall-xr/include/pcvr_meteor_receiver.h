@@ -3,6 +3,7 @@
 #include "pcvr_meteor_wire.h"
 #include "pcvr_frame_accounting.h"
 #include "pcvr_decoded_region.h"
+#include "pcvr_latency_histogram.h"
 #include <android/hardware_buffer.h>
 #include <media/NdkImageReader.h>
 #include <media/NdkMediaCodec.h>
@@ -25,6 +26,10 @@ public:
     bool frame(AHardwareBuffer *&buffer, MeteorXrFrame &metadata, PCVRDecodedRegion &region);
     void release_frame(); // Render thread, only after its sampling fence signals.
     PCVRFrameAccounting stats;
+    PCVRLatencyHistogram receive_to_output, output_to_selection, receive_to_selection, selection_intervals;
+    std::atomic<int> decoder_poll_ms{1}; // Wake to drain hardware output independently of the next network frame.
+    std::atomic<bool> buffered_frames{true}; // Preserve brief bursts; consumer age is bounded to two periods.
+    std::atomic<uint64_t> queue_age_trims{0};
     std::atomic<uint32_t> video_width{0}, video_height{0}, video_codec{0}, video_fps{0};
     std::atomic<uint64_t> received_bytes{0};
 private:
@@ -34,7 +39,9 @@ private:
     mutable std::mutex mutex;
     std::mutex network_mutex;
     std::string text;
-    std::map<int64_t, MeteorXrFrame> metadata;
+    struct TimedFrame { MeteorXrFrame frame; uint64_t received_us=0, output_us=0; };
+    std::map<int64_t, TimedFrame> metadata;
+    uint64_t last_selected_us=0; // Render thread only.
     AImageReader *reader = nullptr;
     AImage *held = nullptr; // Render thread owns held image and acquire fence.
     int acquire_fence = -1;

@@ -66,6 +66,15 @@ int main() {
     std::strcpy(info.applicationInfo.applicationName, "Nightfall Monado runtime probe");
     info.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 0, 0);
     info.enabledExtensionCount = std::getenv("METEOR_XR_STACK_FIXTURE") ? 5 : std::getenv("METEOR_XR_CYLINDER_FIXTURE") ? 4 : std::getenv("METEOR_XR_PANORAMA_FIXTURE") ? 3 : 2; info.enabledExtensionNames = enabled;
+    if(std::getenv("METEOR_XR_PREFLIGHT")){
+        XrInstance preflight;
+        check(xrCreateInstance(&info,&preflight),"create preflight instance");
+        XrSystemGetInfo query{XR_TYPE_SYSTEM_GET_INFO};query.formFactor=XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
+        XrSystemId preflight_system;
+        check(xrGetSystem(preflight,&query,&preflight_system),"preflight HMD");
+        check(xrDestroyInstance(preflight),"destroy preflight instance");
+        std::puts("APP_PREFLIGHT completed; creating actual application instance");
+    }
     XrInstance instance; check(xrCreateInstance(&info, &instance), "create instance");
     XrInstanceProperties properties{XR_TYPE_INSTANCE_PROPERTIES};
     check(xrGetInstanceProperties(instance, &properties), "runtime properties");

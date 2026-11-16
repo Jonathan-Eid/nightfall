@@ -136,19 +136,34 @@ impl Drop for StartupClaim {
         }
     }
 }
+fn merge_profile_arguments(mut arguments:Vec<String>,defaults:Vec<String>)->Vec<String> {
+    let mut index=0;
+    while index<defaults.len() {
+        let default=&defaults[index];
+        let key=default.split('=').next().unwrap();
+        // Keep a separate option value attached to its flag. Otherwise an
+        // explicit '--frames 3600' plus default '--frames 7200' appends a stray
+        // '7200', and ordinary games reject the resulting command line.
+        let has_value=default.starts_with('-') && !default.contains('=')
+            && defaults.get(index+1).is_some_and(|value|!value.starts_with('-') || value.parse::<f64>().is_ok());
+        let count=if has_value {2} else {1};
+        if !arguments.iter().any(|arg|arg.split('=').next().unwrap().eq_ignore_ascii_case(key)) {
+            arguments.extend_from_slice(&defaults[index..index+count]);
+        }
+        index+=count;
+    }
+    arguments
+}
+
 pub(crate) fn queue_steam(root:&Path,launch:crate::xr_steam_windows::Launch,socket:std::net::TcpStream)->io::Result<()> {
     socket.set_nonblocking(true)?;
     let result=(|| {
         let game=games(root)?.into_iter().find(|g|g.app_id==launch.app_id).ok_or_else(||io::Error::other("Register this Steam game in Meteor before using its XR wrapper"))?;
         let mut files=game.files()?;
         files.application=launch.command[0].clone().into();
-        let mut arguments=launch.command[1..].to_vec();
         // Steam's explicit flags win; retain required profile defaults only
         // when that option was not supplied (e.g. Moss's -dx11/-hmd=SteamVR).
-        for default in files.arguments {
-            let key=default.split('=').next().unwrap();
-            if !arguments.iter().any(|arg|arg.split('=').next().unwrap().eq_ignore_ascii_case(key)){arguments.push(default);}
-        }
+        let arguments=merge_profile_arguments(launch.command[1..].to_vec(),files.arguments);
         if arguments.len()>64{return Err(io::Error::other("Steam command and profile defaults exceed 64 arguments"));}
         files.arguments=arguments;files.working_directory=Some(launch.cwd);
         let completion=socket.try_clone()?;
@@ -288,6 +303,16 @@ pub fn command(args:&[String])->io::Result<String> {
 }
 
 #[cfg(test)]mod tests {
+    #[test]fn explicit_launch_options_replace_profile_flag_value_pairs(){
+        fn strings(items:&[&str])->Vec<String>{items.iter().map(|s|s.to_string()).collect()}
+        let defaults=strings(&["probe.py","--frames","7200","--timeout","180","-dx11","-hmd=SteamVR"]);
+        let explicit=strings(&["probe.py","--frames","3600","-hmd=Other"]);
+        assert_eq!(super::merge_profile_arguments(explicit,defaults),strings(&[
+            "probe.py","--frames","3600","-hmd=Other","--timeout","180","-dx11"]));
+        assert_eq!(super::merge_profile_arguments(strings(&["--frames=24"]),strings(&["--frames","7200"])),strings(&["--frames=24"]));
+        assert_eq!(super::merge_profile_arguments(strings(&["--offset","-2"]),strings(&["--offset","-1","--label","literal & %PATH%"])),
+            strings(&["--offset","-2","--label","literal & %PATH%"]));
+    }
     use super::*;
     #[test]fn catalog_rejects_remote_paths_and_unknown_games(){
         let root=std::env::temp_dir().join(format!("meteor-catalog-{}",std::process::id()));let _=std::fs::remove_dir_all(&root);std::fs::create_dir_all(&root).unwrap();

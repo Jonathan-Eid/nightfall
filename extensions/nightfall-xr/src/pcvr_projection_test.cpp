@@ -22,6 +22,8 @@ void NightfallXrProjectionTest::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("stream_available"), &NightfallXrProjectionTest::stream_available);
 	ClassDB::bind_method(D_METHOD("stop_test"), &NightfallXrProjectionTest::stop_test);
 	ClassDB::bind_method(D_METHOD("get_test_status"), &NightfallXrProjectionTest::get_test_status);
+	ClassDB::bind_method(D_METHOD("set_meteor_decoder_poll_ms", "interval"), &NightfallXrProjectionTest::set_meteor_decoder_poll_ms);
+	ClassDB::bind_method(D_METHOD("set_meteor_frame_buffering", "enabled"), &NightfallXrProjectionTest::set_meteor_frame_buffering);
 	ClassDB::bind_method(D_METHOD("set_wristwatch", "state"), &NightfallXrProjectionTest::set_wristwatch);
 	ClassDB::bind_method(D_METHOD("set_workspace_input_focus", "focused"), &NightfallXrProjectionTest::set_workspace_input_focus);
 	ClassDB::bind_method(D_METHOD("get_wristwatch_tracking"), &NightfallXrProjectionTest::get_wristwatch_tracking);
@@ -183,6 +185,26 @@ void NightfallXrProjectionTest::stop_test() {
 	while (current != IDLE && current != STOPPING && !state.compare_exchange_weak(current, STOPPING)) {}
 }
 
+bool NightfallXrProjectionTest::set_meteor_decoder_poll_ms(int p_interval) {
+#ifdef __ANDROID__
+	if(!meteor || p_interval<1 || p_interval>10) return false;
+	meteor->decoder_poll_ms.store(p_interval);
+	return true;
+#else
+	return false;
+#endif
+}
+
+bool NightfallXrProjectionTest::set_meteor_frame_buffering(bool p_enabled) {
+#ifdef __ANDROID__
+	if(!meteor) return false;
+	meteor->buffered_frames.store(p_enabled);
+	return true;
+#else
+	return false;
+#endif
+}
+
 Dictionary NightfallXrProjectionTest::get_test_status() const {
 	static const char *names[] = {"idle", "starting", "running", "stopping", "failed"};
 	Dictionary result;
@@ -199,6 +221,24 @@ Dictionary NightfallXrProjectionTest::get_test_status() const {
 	result["meteor_frame_ready"] = meteor_mode && meteor_presentation.is_ready();
 	result["meteor_projection_enabled"] = meteor_mode && meteor_presentation.present();
 	if (meteor) {
+		Dictionary timings;
+		auto duration=[&](const char *name,const PCVRLatencyHistogram &hist) {
+			Dictionary sample;
+			sample["count"]=int64_t(hist.count.load());
+			sample["sum_us"]=int64_t(hist.sum_us.load());
+			sample["max_us"]=int64_t(hist.maximum_us.load());
+			sample["p50_upper_us"]=int64_t(hist.percentile_upper_us(50));
+			sample["p95_upper_us"]=int64_t(hist.percentile_upper_us(95));
+			timings[name]=sample;
+		};
+		duration("receive_to_codec_output",meteor->receive_to_output);
+		duration("codec_output_to_selection",meteor->output_to_selection);
+		duration("receive_to_selection",meteor->receive_to_selection);
+		duration("selection_interval",meteor->selection_intervals);
+		result["meteor_device_timing_us"]=timings;
+		result["decoder_poll_ms"]=meteor->decoder_poll_ms.load();
+		result["buffered_frames"]=meteor->buffered_frames.load();
+		result["queue_age_trims"]=int64_t(meteor->queue_age_trims.load());
 		const auto &s=meteor->stats;
 		Dictionary counts;
 		counts["received"]=int64_t(s.received.load()); counts["queued"]=int64_t(s.queued.load());

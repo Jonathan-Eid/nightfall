@@ -10,7 +10,10 @@
 #include <cerrno>
 #include <chrono>
 
-namespace { int64_t millis() { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); } }
+namespace {
+int64_t millis() { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+uint64_t micros() { return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+}
 PCVRMeteorReceiver::~PCVRMeteorReceiver() { stop_after_gpu_drain(); if (worker.joinable()) worker.join(); }
 std::string PCVRMeteorReceiver::message() const { std::lock_guard<std::mutex> lock(mutex); return text; }
 void PCVRMeteorReceiver::status(const std::string &value, bool error) {
@@ -23,6 +26,9 @@ bool PCVRMeteorReceiver::start() {
     if (worker.joinable()) worker.join();
     failure.store(false); stop.store(false); done.store(false); ready.store(false); eos = false;
     stats.reset();
+    receive_to_output.reset(); output_to_selection.reset(); receive_to_selection.reset(); selection_intervals.reset();
+    last_selected_us=0;
+    queue_age_trims=0;
     last_buffer_width=0; last_buffer_height=0;
     video_width=0; video_height=0; video_codec=0; video_fps=0; received_bytes=0;
     worker = std::thread(&PCVRMeteorReceiver::run, this); return true;
@@ -36,7 +42,12 @@ bool PCVRMeteorReceiver::frame(AHardwareBuffer *&buffer, MeteorXrFrame &value, P
     std::unique_lock<std::mutex> lock(mutex, std::try_to_lock);
     if (!lock.owns_lock()) { ++stats.lock_busy; return false; }
     if (!reader || borrowed) return false;
-    if (!held && AImageReader_acquireLatestImageAsync(reader, &held, &acquire_fence) != AMEDIA_OK) { ++stats.no_image; return false; }
+    if (!held) {
+        const media_status_t acquired=buffered_frames.load()
+            ? AImageReader_acquireNextImageAsync(reader,&held,&acquire_fence)
+            : AImageReader_acquireLatestImageAsync(reader,&held,&acquire_fence);
+        if(acquired!=AMEDIA_OK) { ++stats.no_image; return false; }
+    }
     if (acquire_fence >= 0) {
         pollfd fd{acquire_fence, POLLIN, 0};
         if (poll(&fd, 1, 0) <= 0) { ++stats.acquire_wait; return false; }
@@ -49,7 +60,26 @@ bool PCVRMeteorReceiver::frame(AHardwareBuffer *&buffer, MeteorXrFrame &value, P
         // Don't guess which frame a buffer belongs to.
         lock.unlock(); status("Decoded buffer timestamp has no matching frame metadata", true); return false;
     }
-    value = metadata.at(timestamp);
+    const auto &timing=metadata.at(timestamp);
+    // Preserve a brief burst for smooth cadence, but never accumulate an
+    // unbounded FIFO latency after a stalled render thread. Receipt and age
+    // use the same headset monotonic clock; packet timestamps are synthetic.
+    const uint64_t now_us=micros();
+    const uint64_t age_limit_us=2000000 / timing.frame.fps;
+    if(buffered_frames.load() && now_us>=timing.received_us && now_us-timing.received_us>age_limit_us) {
+        AImage_delete(held); held=nullptr;
+        ++queue_age_trims;
+        // Catch up on the next render poll without blocking or keeping a
+        // stale image; latest acquisition also releases queued older images.
+        if(AImageReader_acquireLatestImageAsync(reader,&held,&acquire_fence)!=AMEDIA_OK) held=nullptr;
+        return false;
+    }
+    value = timing.frame;
+    const uint64_t selected_us=micros();
+    if(timing.output_us && selected_us>=timing.output_us) output_to_selection.observe(selected_us-timing.output_us);
+    if(selected_us>=timing.received_us) receive_to_selection.observe(selected_us-timing.received_us);
+    if(last_selected_us && selected_us>=last_selected_us) selection_intervals.observe(selected_us-last_selected_us);
+    last_selected_us=selected_us;
     AHardwareBuffer_Desc desc{};
     AHardwareBuffer_describe(buffer,&desc);
     AImageCropRect crop{};
@@ -95,7 +125,15 @@ bool PCVRMeteorReceiver::drain() {
         if (index == AMEDIACODEC_INFO_OUTPUT_BUFFERS_CHANGED) continue;
         if (index < 0) { status("MediaCodec output dequeue failed: " + std::to_string(index), true); return false; }
         bool render;
-        { std::lock_guard<std::mutex> lock(mutex); render = metadata.count(info.presentationTimeUs * 1000) != 0; }
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            auto found=metadata.find(info.presentationTimeUs * 1000);
+            render=found!=metadata.end();
+            if(render && !found->second.output_us) {
+                found->second.output_us=micros();
+                receive_to_output.observe(found->second.output_us-found->second.received_us);
+            }
+        }
         if (AMediaCodec_releaseOutputBuffer(codec, size_t(index), render) != AMEDIA_OK) return false;
         if (render) ++stats.output;
         if (info.flags & AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM) eos = true;
@@ -125,6 +163,10 @@ bool PCVRMeteorReceiver::decoder(const MeteorXrFrame &frame) {
     AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_FRAME_RATE, frame.fps);
     AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_MAX_INPUT_SIZE, 8 * 1024 * 1024);
     AMediaFormat_setInt32(format, "low-latency", 1);
+    // ImageReader is not a display View. Android otherwise allows its Surface
+    // to discard decoded frames before even acquireNextImage can see them.
+    // Keep the bounded reader responsible for dropping stale frames instead.
+    AMediaFormat_setInt32(format, "allow-frame-drop", 0);
     media_status_t result = AMediaCodec_configure(codec, format, window, nullptr, 0);
     AMediaFormat_delete(format);
     if (result != AMEDIA_OK || AMediaCodec_start(codec) != AMEDIA_OK) return false;
@@ -151,7 +193,7 @@ bool PCVRMeteorReceiver::io(int fd, void *data, size_t size, bool writing, int64
     while (size && !stop.load() && millis() < deadline) {
         if (!drain()) return false;
         pollfd poll_fd{fd, short(writing ? POLLOUT : POLLIN), 0};
-        int ready = poll(&poll_fd, 1, 10);
+        int ready = poll(&poll_fd, 1, decoder_poll_ms.load(std::memory_order_relaxed));
         if (ready < 0 && errno == EINTR) continue;
         if (ready <= 0) continue;
         ssize_t count = writing ? send(fd, cursor, size, MSG_NOSIGNAL) : recv(fd, cursor, size, 0);
@@ -215,7 +257,7 @@ void PCVRMeteorReceiver::run() {
                         "Meteor: render consumer stalled; metadata backlog=%zu", metadata.size());
                     break;
                 }
-                metadata[pts_us * 1000] = frame;
+                metadata[pts_us * 1000] = TimedFrame{frame,micros(),0};
             }
             if (!input(payload, pts_us, false)) break;
             ++stats.queued;

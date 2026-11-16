@@ -30,7 +30,7 @@ var _pending_foveation := -1
 var _pending_bitrate := -1
 var _bitrate_deadline := 0
 var _generation := 0
-var _peer: StreamPeerTCP
+var _peer # StreamPeerTCP or NightfallTcpPeer for scoped USB IPv6.
 var _send
 var _receive
 var _tx := 0
@@ -60,9 +60,20 @@ static func config_path() -> String:
 			if not external.is_empty() and FileAccess.file_exists(external): return external
 	return CONFIG
 
+static func valid_host(address: String) -> bool:
+	if "%" not in address: return address.is_valid_ip_address()
+	var parts := address.split("%")
+	if parts.size() != 2 or not MeteorClient.is_link_local(parts[0]) or not parts[0].is_valid_ip_address(): return false
+	return parts[1].is_valid_identifier() or (parts[1].is_valid_int() and int(parts[1]) > 0)
+
+static func _new_peer(address: String):
+	if "%" in address and ClassDB.class_exists("NightfallTcpPeer"):
+		return ClassDB.instantiate("NightfallTcpPeer")
+	return StreamPeerTCP.new()
+
 func set_discovered_host(address: String, info: Dictionary) -> void:
 	var offer := MeteorClient.xr_info(info)
-	if offer.is_empty() or not address.is_valid_ip_address():
+	if offer.is_empty() or not valid_host(address):
 		if state == "watching": cancel()
 		_discovered_config = null
 		return
@@ -337,7 +348,7 @@ func public_identity() -> String:
 	if identity.size() != 32: return ""
 	return ClassDB.instantiate("MeteorChannelCipher").identity_public(identity).hex_encode()
 
-func _read(peer: StreamPeerTCP, count: int, token: int, timeout_ms: int = 5000) -> PackedByteArray:
+func _read(peer, count: int, token: int, timeout_ms: int = 5000) -> PackedByteArray:
 	var out := PackedByteArray()
 	var deadline := Time.get_ticks_msec() + timeout_ms
 	while out.size() < count and token == _generation:
@@ -345,27 +356,31 @@ func _read(peer: StreamPeerTCP, count: int, token: int, timeout_ms: int = 5000) 
 		if peer.get_status() != StreamPeerTCP.STATUS_CONNECTED or Time.get_ticks_msec() >= deadline: return PackedByteArray()
 		var available := mini(peer.get_available_bytes(), count - out.size())
 		if available > 0:
-			var result := peer.get_partial_data(available)
+			var result: Array = peer.get_partial_data(available)
 			if result[0] != OK: return PackedByteArray()
 			out.append_array(result[1])
 		else:
 			await owner.get_tree().process_frame
 	return out if token == _generation else PackedByteArray()
 
-func _write(peer: StreamPeerTCP, bytes: PackedByteArray, token: int) -> bool:
+func _write(peer, bytes: PackedByteArray, token: int) -> bool:
+	# The native USB peer's small-message writer also bounds its wait. Older
+	# installed extensions expose put_data rather than put_partial_data.
+	if not peer.has_method("put_partial_data"):
+		return token == _generation and peer.put_data(bytes) == OK
 	var offset := 0
 	var deadline := Time.get_ticks_msec() + 5000
 	while offset < bytes.size() and token == _generation:
 		peer.poll()
 		if peer.get_status() != StreamPeerTCP.STATUS_CONNECTED or Time.get_ticks_msec() >= deadline: return false
-		var result := peer.put_partial_data(bytes.slice(offset))
+		var result: Array = peer.put_partial_data(bytes.slice(offset))
 		if result[0] != OK: return false
 		offset += int(result[1])
 		if offset < bytes.size(): await owner.get_tree().process_frame
 	return token == _generation
 
 func _request(request: Dictionary, token: int) -> Dictionary:
-	var peer := _peer
+	var peer = _peer
 	var plain := JSON.stringify(request).to_utf8_buffer()
 	if plain.size() > MAX_FRAME - 16 or _tx == 0x7fffffffffffffff: return {}
 	var header := PackedByteArray()
@@ -402,7 +417,7 @@ func connect_offer(watch_only: bool = false) -> void:
 	var host := str(config.get_value("host", "address", ""))
 	var port := int(config.get_value("host", "port", 0))
 	var pin := str(config.get_value("host", "key", "")).to_lower()
-	if not host.is_valid_ip_address() or port < 1 or port > 65535 or not valid_pin(pin):
+	if not valid_host(host) or port < 1 or port > 65535 or not valid_pin(pin):
 		_fail("Invalid developer address, port or pinned host key")
 		return
 	var identity := _identity()
@@ -411,8 +426,8 @@ func connect_offer(watch_only: bool = false) -> void:
 		return
 	_busy = true
 	var token := _generation
-	_peer = StreamPeerTCP.new()
-	var peer := _peer
+	_peer = _new_peer(host)
+	var peer = _peer
 	_status("connecting", "Authenticating Meteor control")
 	if peer.connect_to_host(host, port) != OK:
 		_fail("Control connection failed")

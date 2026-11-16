@@ -35,7 +35,10 @@ func process_auto_xr(delta: float) -> void:
 	var address := str(config.get_value("host","address",""))
 	var same_host := false
 	for host in main.stream_backend.get_hosts():
-		if host.get("id") == main.current_host_id and address in [host.get("localaddress",""),host.get("remoteaddress","")]: same_host = true
+		if host.get("id") != main.current_host_id: continue
+		var cm = main.stream_backend.get_computer_manager()
+		var active_address: String = cm.get_host_address(host) if cm else host.get("localaddress", "")
+		if address == MeteorClient.zone_address(active_address): same_host = true
 	if not same_host: return
 	if control.state not in ["idle","failed"]: return
 	_auto_retry = 5.0

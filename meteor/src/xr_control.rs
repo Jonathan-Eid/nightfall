@@ -311,7 +311,7 @@ async fn connection_supervised(
     pairing: Option<Arc<crate::xr_trust::Trust>>,
     relay_ports: Option<(u16, u16)>,
 ) -> io::Result<()> {
-    let bind = stream.local_addr()?.ip();
+    let bind = stream.local_addr()?;
     let authenticated = tokio::time::timeout(IO_TIMEOUT, async {
         let mut server_nonce = [0; 32];
         SystemRandom::new()
@@ -485,7 +485,7 @@ async fn connection_supervised(
                 .as_ref()
                 .ok_or_else(|| invalid("no accepted lease"))?;
             relay = Some(
-                crate::xr_relay::Relay::prepare_on_ports(
+                crate::xr_relay::Relay::prepare_on_address(
                     bind,
                     crate::xr_relay::Credentials {
                         host: key.clone(),
@@ -652,7 +652,7 @@ pub async fn command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     } else {None};
     let key = Arc::new(MeteorKey::load_or_create(Path::new(&args[1]))?);
     let allowed = public_key(&args[2])?;
-    let listener = TcpListener::bind(address).await?;
+    let listener = crate::net::tcp_listener_at(address).await?;
     println!(
         "Meteor XR control-only DEV listening on {}; pinned host key {}",
         listener.local_addr()?,

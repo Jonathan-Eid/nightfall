@@ -110,7 +110,7 @@ pub struct XrConfig {
 
 impl Default for XrConfig {
     fn default() -> Self {
-        Self { enabled: false, listen: "0.0.0.0:47910".into(), video_port: 47911, tracking_port: 47912, allowed_client: None, runtime_root: None, encoder_backend: "auto".into(), render_device: None }
+        Self { enabled: false, listen: "[::]:47910".into(), video_port: 47911, tracking_port: 47912, allowed_client: None, runtime_root: None, encoder_backend: "auto".into(), render_device: None }
     }
 }
 

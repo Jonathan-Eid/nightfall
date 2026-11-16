@@ -472,7 +472,7 @@ async fn main() {
                         String::from_utf8_lossy(&check.stderr).chars().take(1200).collect::<String>())));
                 }
             }
-            let listener = tokio::net::TcpListener::bind(address).await?;
+            let listener = net::tcp_listener_at(address).await?;
             let port = listener.local_addr()?.port();
             let relay_ports = if dev_xr_address.is_none() {
                 let pair = (config.xr.video_port, config.xr.tracking_port);

@@ -9,7 +9,7 @@ use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use std::{
     io,
-    net::IpAddr,
+    net::{IpAddr, SocketAddr},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -141,12 +141,15 @@ impl Relay {
         Self::prepare_on_ports(bind, credentials, None).await
     }
     pub async fn prepare_on_ports(bind: IpAddr, credentials: Credentials, fixed: Option<(u16, u16)>) -> io::Result<Self> {
+        Self::prepare_on_address(SocketAddr::new(bind, 0), credentials, fixed).await
+    }
+    pub async fn prepare_on_address(bind: SocketAddr, credentials: Credentials, fixed: Option<(u16, u16)>) -> io::Result<Self> {
         if fixed.is_some_and(|(video, tracking)| video == 0 || tracking == 0 || video == tracking) {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "XR data ports must be distinct and nonzero"));
         }
-        let (video_port, tracking_port) = fixed.unwrap_or((0, 0));
-        let video = TcpListener::bind((bind, video_port)).await?;
-        let tracking = TcpListener::bind((bind, tracking_port)).await?;
+        let (video_address, tracking_address) = lane_addresses(bind, fixed);
+        let video = TcpListener::bind(video_address).await?;
+        let tracking = TcpListener::bind(tracking_address).await?;
         let local_video = TcpListener::bind("127.0.0.1:0").await?;
         let local_tracking = TcpListener::bind("127.0.0.1:0").await?;
         let ports = Ports {
@@ -264,6 +267,24 @@ impl Relay {
         if let Some(owner) = owner { owner.track(task); }
     }
 }
+// Reuse the accepted control socket's interface, including an IPv6 link-local
+// scope. Extracting only IpAddr loses the USB interface on Windows.
+fn lane_addresses(mut bind: SocketAddr, fixed: Option<(u16, u16)>) -> (SocketAddr, SocketAddr) {
+    // A dual-stack control listener reports IPv4 peers as ::ffff:a.b.c.d.
+    // Bind their data lanes as IPv4 instead of relying on OS-specific support
+    // for binding an IPv4-mapped address on a new IPv6-only socket.
+    if let SocketAddr::V6(address) = bind {
+        if let Some(ip) = address.ip().to_ipv4_mapped() {
+            bind = SocketAddr::new(IpAddr::V4(ip), address.port());
+        }
+    }
+    let (video, tracking) = fixed.unwrap_or((0, 0));
+    bind.set_port(video);
+    let video_address = bind;
+    bind.set_port(tracking);
+    (video_address, bind)
+}
+
 impl Drop for Relay {
     fn drop(&mut self) {
         self.stop.send_replace(true);
@@ -398,6 +419,41 @@ async fn tracking(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn usb_lane_addresses_preserve_ipv6_scope() {
+        let control = SocketAddr::V6(std::net::SocketAddrV6::new(
+            "fe80::1234".parse().unwrap(), 47910, 0, 50));
+        let (video, tracking) = lane_addresses(control, Some((47911, 47912)));
+        assert_eq!(video, "[fe80::1234%50]:47911".parse().unwrap());
+        assert_eq!(tracking, "[fe80::1234%50]:47912".parse().unwrap());
+        let (video, tracking) = lane_addresses(control, None);
+        assert_eq!(video.port(), 0);
+        assert_eq!(tracking.port(), 0);
+        assert_eq!(match video { SocketAddr::V6(a) => a.scope_id(), _ => 0 }, 50);
+    }
+
+    #[tokio::test]
+    async fn ipv4_control_on_dual_stack_listener_opens_ipv4_lanes() {
+        let control = crate::net::tcp_listener_at("[::]:0".parse().unwrap()).await.unwrap();
+        let client = TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, control.local_addr().unwrap().port())).await.unwrap();
+        let (accepted, _) = control.accept().await.unwrap();
+        let bind = accepted.local_addr().unwrap();
+        let (video, tracking) = lane_addresses(bind, None);
+        assert!(video.is_ipv4() && tracking.is_ipv4());
+        let relay = Relay::prepare_on_address(bind, credentials(), None).await.unwrap();
+        TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, relay.ports.video)).await.unwrap();
+        TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, relay.ports.tracking)).await.unwrap();
+        drop(client);
+    }
+
+    #[tokio::test]
+    async fn ipv6_relay_listens_on_both_data_lanes() {
+        let relay = Relay::prepare_on_address("[::1]:47910".parse().unwrap(), credentials(), None).await.unwrap();
+        let video = TcpStream::connect((std::net::Ipv6Addr::LOCALHOST, relay.ports.video)).await.unwrap();
+        let tracking = TcpStream::connect((std::net::Ipv6Addr::LOCALHOST, relay.ports.tracking)).await.unwrap();
+        assert!(video.peer_addr().unwrap().is_ipv6());
+        assert!(tracking.peer_addr().unwrap().is_ipv6());
+    }
     struct CleanupFlag(Arc<AtomicBool>);
     impl Drop for CleanupFlag {
         fn drop(&mut self) { self.0.store(true, Ordering::Release); }

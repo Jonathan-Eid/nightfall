@@ -10,6 +10,10 @@ class Owner extends Node:
 	func _log(_message: String) -> void: pass
 
 func _init() -> void:
+	for address in ["10.0.0.13", "::1", "fe80::1234%usb0", "fe80::1234%50"]:
+		assert(ControlClient.valid_host(address))
+	for address in ["", "host.example", "fe80::1234%", "fe80::1234%usb0%other", "10.0.0.13%usb0", "2001:db8::1%usb0", "fe80::1234%../usb0", "fe80::1234%0"]:
+		assert(not ControlClient.valid_host(address))
 	assert(ControlClient.valid_launch_notice({"generation":"a".repeat(32),"app_id":"438100"}))
 	assert(not ControlClient.valid_launch_notice({"generation":"a".repeat(31),"app_id":"438100"}))
 	assert(not ControlClient.valid_launch_notice({"generation":"g".repeat(32),"app_id":"438100"}))
@@ -31,6 +35,8 @@ func _init() -> void:
 	client.set_discovered_host("10.0.0.13", {"key":key,"xr":{"port":47910,"backend":"linux-nvidia","authorization":"allowlist"}})
 	assert(client.current_config().get_value("host", "address") == "10.0.0.13")
 	assert(client.current_config().get_value("host", "handover_on_ready"))
+	client.set_discovered_host("fe80::1234%usb0", {"key":key,"xr":{"port":47910,"backend":"linux-nvidia","authorization":"allowlist"}})
+	assert(client.current_config().get_value("host", "address") == "fe80::1234%usb0")
 	assert(ControlClient.approval_code(key) == "0F6D2553")
 	assert(ControlClient.approval_code("invalid").is_empty())
 

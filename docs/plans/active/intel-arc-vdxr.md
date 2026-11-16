@@ -155,8 +155,40 @@ through Meteor's proxy. A firewall restricted to the proxy alone prevents the
 initial PIN exchange. Scope host pairing and proxy rules separately by program,
 protocol, required ports, network interface/profile and client address.
 
-The stock release does not expose the development control bridge in this
-session. Motion-to-photon latency, comfort, controller calibration/haptics,
+### USB validation, November 16
+
+The stock client supported USB desktop streaming, but its XR control path
+rejected a zoned IPv6 address and used Godot's `StreamPeerTCP`, which cannot
+retain the interface zone. Automatic XR also compared discovery against only
+the saved Wi-Fi addresses. The client now uses the existing `NightfallTcpPeer`
+for scoped USB control and checks the host address actually selected by the
+streaming backend. The host retains the accepted socket's IPv6 scope when
+binding video/tracking lanes. Its default control listener accepts IPv4 and
+IPv6; an explicit listen address continues to restrict the listener.
+
+A separate local `Nightfall USB Test` package was installed beside the stock
+client, retaining the stock client's data and pairing. This diagnostic package
+reused the signed release's existing engine/native assets, replaced the two
+changed GDScript assets and their sparse-pack index entries, and was signed
+locally under a different package ID. It is a local test artifact, not a full
+Android source build or a published release. Normal builds use `BUILD.md`.
+
+At 75% Quest 2 resolution, the negotiated eyes were 1376×1440, a packed
+2752×1440 H.264 frame, targeting 72 Hz. The earlier Wi-Fi trial submitted
+56.2 FPS. Two USB trials submitted 71.2 and 71.1 FPS; each delivered all 3,600
+packets, acknowledged completion and reported zero transport failures. The
+second trial ran entirely with Quest Wi-Fi disabled. Live TCP connections on
+47910/47911/47912 used the USB adapter's scoped link-local IPv6 addresses.
+Quest Wi-Fi was restored afterwards. These are sequential trials of a GPU
+test scene, not game benchmarks or a motion-to-photon measurement.
+
+The final USB patch passed 189 Windows Rust tests (20 existing ignored),
+including IPv4 and IPv6 lane connectivity, dual-stack listener behavior and
+scope preservation; all 12 address validation cases also passed inside the
+Quest app. See the
+[USB PCVR setup and checks](../../guides/meteor-usb-pcvr.md).
+
+Motion-to-photon latency, comfort, controller calibration/haptics,
 additional games, other Intel GPUs, Linux Intel, AV1, 90 Hz and conformance
 remain unvalidated.
 

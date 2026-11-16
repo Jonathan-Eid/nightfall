@@ -298,10 +298,10 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wparam: WPARAM, 
                     *XR_GAMES.lock().unwrap()=games.iter().map(|g|g.app_id.clone()).collect();
                     for (i,game) in games.iter().enumerate() {
                         let submenu=CreatePopupMenu();if submenu.is_null(){continue;}
-                        for (j,backend) in [crate::xr_windows::Backend::Monado,crate::xr_windows::Backend::Steamvr].into_iter().enumerate() {
-                            let available=if j==0 {game.monado.is_some()}else{game.steamvr.is_some()};
-                            let label=wide(if j==0 {"Monado / xrizer"}else{"SteamVR"});
-                            AppendMenuW(submenu,MF_STRING|if game.backend==backend {MF_CHECKED}else{0}|if available {0}else{MF_GRAYED},CMD_XR_GAME_BASE+i*2+j,label.as_ptr());
+                        for (j,backend) in [crate::xr_windows::Backend::Monado,crate::xr_windows::Backend::Steamvr,crate::xr_windows::Backend::Vdxr].into_iter().enumerate() {
+                            let available=match j {0=>game.monado.is_some(),1=>game.steamvr.is_some(),_=>game.vdxr.is_some()};
+                            let label=wide(match j {0=>"Monado / xrizer",1=>"SteamVR",_=>"Nightfall / VDXR (experimental)"});
+                            AppendMenuW(submenu,MF_STRING|if game.backend==backend {MF_CHECKED}else{0}|if available {0}else{MF_GRAYED},CMD_XR_GAME_BASE+i*3+j,label.as_ptr());
                         }
                         let label=wide(&game.name);AppendMenuW(xr_menu,MF_POPUP,submenu as usize,label.as_ptr());
                     }
@@ -370,11 +370,11 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wparam: WPARAM, 
                     return 0;
                 }
             }
-            if (CMD_XR_GAME_BASE..CMD_XR_GAME_BASE+200).contains(&command) {
-                let index=(command-CMD_XR_GAME_BASE)/2;
+            if (CMD_XR_GAME_BASE..CMD_XR_GAME_BASE+3000).contains(&command) {
+                let index=(command-CMD_XR_GAME_BASE)/3;
                 let id=XR_GAMES.lock().unwrap().get(index).cloned();
                 if let Some(id)=id {
-                    let backend=if (command-CMD_XR_GAME_BASE)%2==0 {crate::xr_windows::Backend::Monado}else{crate::xr_windows::Backend::Steamvr};
+                    let backend=match (command-CMD_XR_GAME_BASE)%3 {0=>crate::xr_windows::Backend::Monado,1=>crate::xr_windows::Backend::Steamvr,_=>crate::xr_windows::Backend::Vdxr};
                     if let Err(error)=crate::xr_windows::select(&crate::xr_windows::root(),&id,backend){log::warn!("PCVR backend: {error}");}
                 }
                 return 0;

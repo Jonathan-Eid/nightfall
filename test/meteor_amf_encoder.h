@@ -41,25 +41,7 @@ struct MeteorAmfRuntime {
     ~MeteorAmfRuntime() { if(dll) FreeLibrary(dll); }
 };
 
-// The D3D11 device on the adapter with this LUID; nullptr when there is none.
-static Microsoft::WRL::ComPtr<ID3D11Device> meteor_d3d11_on(const uint8_t *luid) {
-    Microsoft::WRL::ComPtr<IDXGIFactory1> dxgi;
-    if(FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&dxgi)))) return nullptr;
-    Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
-    for(UINT i=0;dxgi->EnumAdapters1(i,&adapter)!=DXGI_ERROR_NOT_FOUND;++i) {
-        DXGI_ADAPTER_DESC1 desc{};
-        if(SUCCEEDED(adapter->GetDesc1(&desc)) && (!luid || !std::memcmp(&desc.AdapterLuid,luid,sizeof(LUID)))) {
-            if(!luid && desc.VendorId!=0x1002) { adapter.Reset(); continue; }
-            Microsoft::WRL::ComPtr<ID3D11Device> device;
-            const D3D_FEATURE_LEVEL levels[]={D3D_FEATURE_LEVEL_11_1,D3D_FEATURE_LEVEL_11_0};
-            if(SUCCEEDED(D3D11CreateDevice(adapter.Get(),D3D_DRIVER_TYPE_UNKNOWN,nullptr,0,levels,2,D3D11_SDK_VERSION,&device,nullptr,nullptr)))
-                return device;
-            return nullptr;
-        }
-        adapter.Reset();
-    }
-    return nullptr;
-}
+#include "meteor_d3d11_device.h"
 
 // The largest frame (width, height) the AMD encoder takes for this codec, from AMF's caps:
 // the smaller of its input and output ranges. {0,0} when unknown.

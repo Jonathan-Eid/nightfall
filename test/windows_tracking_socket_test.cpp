@@ -120,6 +120,7 @@ int main(int argc,char **argv) {
     assert(haptics.load()==3);
     pause.store(true); std::this_thread::sleep_for(std::chrono::milliseconds(350));
     assert(!meteor_tracking_pose_v1(client,int64_t(now_ns()),pose,&stamp));
+    assert(meteor_tracking_connected_v1(client));
     float stale_poses[14]{},stale_values[4]{}; uint32_t stale_buttons=127,stale_flags=15;
     assert(!meteor_tracking_controller_v2(0,int64_t(now_ns()),stale_poses,stale_values,&stale_buttons,&stale_flags,&stamp));
     assert(stale_buttons==0 && stale_flags==0);
@@ -133,6 +134,7 @@ int main(int argc,char **argv) {
     deadline=now_ns()+1000000000;
     while(!static_cast<Client *>(client)->failed.load() && now_ns()<deadline)
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    assert(!meteor_tracking_connected_v1(client));
     assert(!meteor_tracking_pose_v1(client,int64_t(now_ns()),pose,&stamp));
     const auto stopped=now_ns(); meteor_tracking_stop_v1(client);
     assert(now_ns()-stopped<1000000000);

@@ -57,6 +57,10 @@ static void dlclose(void *library) { FreeLibrary((HMODULE)library); }
 #if defined(_WIN32) && defined(METEOR_AMF)
 #include "meteor_amf_bridge.h"
 #endif
+#if defined(_WIN32) && defined(METEOR_QSV)
+#include "meteor_qsv_encoder.h"
+#include "meteor_d3d11_bridge.h"
+#endif
 #endif
 
 #ifdef METEOR_MONADO_BRIDGE
@@ -87,8 +91,19 @@ static void nvenc_bridge_loop(meteor_stereo_encode_v1 request);
 static void bridge_loop() {
     meteor_stereo_encode_v1 request;
     if (!bridge_next(request)) return;
+#if defined(_WIN32) && (defined(METEOR_AMF) || defined(METEOR_QSV))
+    VkPhysicalDeviceProperties selected_gpu{};
+    vkGetPhysicalDeviceProperties(request.gpu,&selected_gpu);
+#endif
+#if defined(_WIN32) && defined(METEOR_QSV)
+    if(selected_gpu.vendorID==0x8086) {
+        std::fprintf(stderr,"METEOR_ENCODER_BACKEND qsv\n");
+        meteor_d3d11_bridge_loop<MeteorQsvEncoder>(request,"qsv");
+        return;
+    }
+#endif
 #if defined(_WIN32) && defined(METEOR_AMF)
-    if (!meteor_cuda_drives(request.gpu)) {
+    if (selected_gpu.vendorID==0x1002) {
         std::fprintf(stderr, "METEOR_ENCODER_BACKEND amf (no CUDA device drives this GPU)\n");
         amf_bridge_loop(request);
         return;
@@ -579,6 +594,16 @@ extern "C" uint32_t meteor_encoder_capabilities_v1(char *json, uint32_t size) {
             const uint32_t h = h264 && h265 ? std::min(h264, h265) : (h264 ? h264 : h265);
             length = std::snprintf(text, sizeof(text), "{\"backend\":\"amf\",\"codecs\":[%s%s%s],\"max_frame\":[%u,%u]}",
                 w264 ? "\"h264\"" : "", w264 && w265 ? "," : "", w265 ? "\"h265\"" : "", w, h);
+        }
+    }
+#endif
+#if defined(_WIN32) && defined(METEOR_QSV)
+    if(length==0) {
+        auto intel=meteor_d3d11_on(nullptr,0x8086);
+        ArcQsvCapabilities caps{};
+        if(intel && arc_qsv_capabilities(intel.Get(),&caps)==0) {
+            length=std::snprintf(text,sizeof(text),"{\"backend\":\"qsv\",\"codecs\":[%s%s%s],\"max_frame\":[%u,%u]}",
+                caps.codecs&1?"\"h264\"":"",caps.codecs==3?",":"",caps.codecs&2?"\"h265\"":"",caps.max_width,caps.max_height);
         }
     }
 #endif

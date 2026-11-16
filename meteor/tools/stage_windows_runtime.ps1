@@ -2,6 +2,7 @@ param([Parameter(Mandatory)][string]$Stage)
 # Stage only runtime binaries/assets; never copy dev config, credentials or logs.
 $ErrorActionPreference='Stop'
 $meteor=Split-Path $PSScriptRoot
+$repo=Split-Path $meteor
 $target=Join-Path $meteor 'target'
 $runtime=Join-Path $Stage 'runtime'
 $bin=Join-Path $runtime 'xr\bin'
@@ -21,6 +22,7 @@ foreach($file in 'cjson.dll','pthreadVCE3.dll','vulkan-1.dll') {
 foreach($file in 'meteor-windows-tracking.dll','meteor-windows-nvenc.dll') {
     CopyRequired "$target\windows-runtime-probe\Release\$file" $bin
 }
+CopyRequired "$target\windows-runtime-probe\Release\meteor-qsv.dll" $bin
 CopyRequired "$target\windows-openxr-loader-build\src\loader\Release\openxr_loader.dll" $bin
 CopyRequired "$target\windows-steamvr-build\Release\meteor-steamvr-mirror.exe" $bin
 $xrizer=Join-Path $runtime 'xr\xrizer\bin'
@@ -29,6 +31,7 @@ CopyRequired "$target\windows-xrizer-d3d11-src\target\release\bin\vrclient_x64.d
 $driver=Join-Path $runtime 'xr\steamvr\bin\win64'
 New-Item -ItemType Directory -Force $driver | Out-Null
 CopyRequired "$target\windows-steamvr-build\meteor\bin\win64\driver_meteor.dll" $driver
+CopyRequired "$target\windows-steamvr-build\meteor\bin\win64\meteor-qsv.dll" $driver
 CopyRequired "$target\windows-steamvr-build\meteor\driver.vrdrivermanifest" (Split-Path (Split-Path $driver))
 # Prefer the clean Ninja build tree; build-meteor-windows predates it and is no longer configured.
 $vpBuild="$target\windows-vibepollo-src\build-multi"
@@ -85,6 +88,8 @@ CopyRequired (Join-Path $PSScriptRoot 'windows-release\Install-SteamVR.ps1') $St
 CopyRequired (Join-Path $PSScriptRoot 'windows-release\SteamVR-Driver.ps1') $Stage
 CopyRequired (Join-Path $PSScriptRoot 'windows-release\Install-VirtualDisplay.ps1') $Stage
 CopyRequired (Join-Path $PSScriptRoot 'windows-release\Firewall-Meteor.ps1') $Stage
+CopyRequired (Join-Path $repo 'test\qsv\LICENSE') (Join-Path $licenses 'QSV-LICENSE.txt')
+CopyRequired (Join-Path $repo 'test\qsv\INTEL-LICENSE') (Join-Path $licenses 'oneVPL-LICENSE.txt')
 foreach($component in @(
     @{name='Monado';source="$target\windows-monado-src\LICENSE"},
     @{name='xrizer';source="$target\windows-xrizer-d3d11-src\LICENSE"},

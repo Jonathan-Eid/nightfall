@@ -7,25 +7,27 @@ use crate::xr_session::Files;
 
 #[derive(Clone,Copy,Default,Debug,PartialEq,Serialize,Deserialize)]
 #[serde(rename_all="lowercase")]
-pub enum Backend {#[default] Monado,Steamvr}
+pub enum Backend {#[default] Monado,Steamvr,Vdxr}
 #[derive(Clone,Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Game {
     pub app_id:String,pub name:String,
     #[serde(default)] pub backend:Backend,
     pub monado:Option<PathBuf>,pub steamvr:Option<PathBuf>,
+    #[serde(default)] pub vdxr:Option<PathBuf>,
     #[serde(default)] pub requires_steamvr:bool,
 }
 impl Game {
     fn profile(&self,backend:Backend)->io::Result<&Path> {
-        match backend {Backend::Monado=>self.monado.as_deref(),Backend::Steamvr=>self.steamvr.as_deref()}
+        match backend {Backend::Monado=>self.monado.as_deref(),Backend::Steamvr=>self.steamvr.as_deref(),Backend::Vdxr=>self.vdxr.as_deref()}
             .ok_or_else(||io::Error::other("This game has no registered profile for that backend"))
     }
     fn files(&self)->io::Result<Files> {
         if self.backend==Backend::Steamvr && self.requires_steamvr {return Err(io::Error::other("This game requires SteamVR to be installed"));}
         let files=crate::xr_session::load(self.profile(self.backend)?)?;
         if files.library_only || files.steam_launch || files.steam_app_id.as_deref()!=Some(self.app_id.as_str()) ||
-            files.steamvr_driver.is_some()!=(self.backend==Backend::Steamvr) {
+            files.steamvr_driver.is_some()!=(self.backend==Backend::Steamvr) ||
+            files.ovr_bridge.is_some()!=(self.backend==Backend::Vdxr) {
             return Err(io::Error::other("Game profile backend/application ID does not match its registration"));
         }
         Ok(files)
@@ -40,7 +42,7 @@ pub fn games(root:&Path)->io::Result<Vec<Game>> {
     let mut seen=std::collections::HashSet::new();
     if games.len()>1000 || games.iter().any(|g|!valid_id(&g.app_id) || !seen.insert(&g.app_id) ||
         g.name.is_empty() || g.name.chars().count()>96 || g.name.chars().any(char::is_control) ||
-        [g.monado.as_ref(),g.steamvr.as_ref()].into_iter().flatten().any(|p|!p.is_absolute())) {
+        [g.monado.as_ref(),g.steamvr.as_ref(),g.vdxr.as_ref()].into_iter().flatten().any(|p|!p.is_absolute())) {
         return Err(io::Error::other("Invalid or duplicate Windows XR game registration"));
     }
     Ok(games)
@@ -238,7 +240,7 @@ pub fn command(args:&[String])->io::Result<String> {
             if !valid_id(id) || name.is_empty() || name.chars().count()>96 || name.chars().any(char::is_control){return Err(io::Error::other("Invalid game metadata"));}
             let mut catalog=games(root)?;
             if let Some(game)=catalog.iter_mut().find(|g|g.app_id==id) {game.requires_steamvr=true;}
-            else {catalog.push(Game {app_id:id.into(),name:name.into(),backend:Backend::Steamvr,monado:None,steamvr:None,requires_steamvr:true});}
+            else {catalog.push(Game {app_id:id.into(),name:name.into(),backend:Backend::Steamvr,monado:None,steamvr:None,vdxr:None,requires_steamvr:true});}
             if catalog.len()>1000{return Err(io::Error::other("At most 1000 games can be registered"));}
             std::fs::create_dir_all(root)?;write(&root.join("windows-games.json"),&serde_json::to_vec_pretty(&catalog)?)?;
             Ok("Game will request SteamVR installation when launched.".into())
@@ -247,14 +249,14 @@ pub fn command(args:&[String])->io::Result<String> {
             let profile=Path::new(option("--profile")?).canonicalize()?;
             let files=crate::xr_session::load(&profile)?;
             let id=files.steam_app_id.clone().filter(|id|valid_id(id)).ok_or_else(||io::Error::other("Profile requires steam_app_id"))?;
-            let backend=if files.steamvr_driver.is_some(){Backend::Steamvr}else{Backend::Monado};
+            let backend=if files.ovr_bridge.is_some(){Backend::Vdxr}else if files.steamvr_driver.is_some(){Backend::Steamvr}else{Backend::Monado};
             if files.steam_launch {return Err(io::Error::other("Catalog profiles launch configured applications directly; steam_launch must be false"));}
             std::fs::create_dir_all(root)?;
             let mut catalog=games(root)?;
-            let index=catalog.iter().position(|g|g.app_id==id).unwrap_or_else(||{catalog.push(Game {app_id:id.clone(),name:String::new(),backend,monado:None,steamvr:None,requires_steamvr:false});catalog.len()-1});
+            let index=catalog.iter().position(|g|g.app_id==id).unwrap_or_else(||{catalog.push(Game {app_id:id.clone(),name:String::new(),backend,monado:None,steamvr:None,vdxr:None,requires_steamvr:false});catalog.len()-1});
             let game=&mut catalog[index];game.name=option("--name")?.into();
             if game.name.is_empty() || game.name.chars().count()>96 || game.name.chars().any(char::is_control){return Err(io::Error::other("Invalid game name"));}
-            match backend {Backend::Monado=>game.monado=Some(profile),Backend::Steamvr=>game.steamvr=Some(profile)}
+            match backend {Backend::Monado=>game.monado=Some(profile),Backend::Steamvr=>game.steamvr=Some(profile),Backend::Vdxr=>game.vdxr=Some(profile)}
             if backend==Backend::Steamvr {game.requires_steamvr=false;}
             // Reimport/update must retain the user's saved backend choice.
             if !game.profile(game.backend).is_ok(){game.backend=backend;}
@@ -357,12 +359,17 @@ pub fn command(args:&[String])->io::Result<String> {
         }
         let exe=std::env::current_exe().unwrap();
         let mut files:Files=serde_json::from_value(json!({"service":exe,"manifest":exe,"encoder":exe,"tracking":exe,"application":exe,"steam_app_id":"846470"})).unwrap();
-        for backend in [Backend::Monado,Backend::Steamvr] {
-            let profile=root.join(if backend==Backend::Monado{"monado"}else{"steamvr-profile"});std::fs::create_dir_all(&profile).unwrap();
+        for backend in [Backend::Monado,Backend::Steamvr,Backend::Vdxr] {
+            let profile=root.join(match backend {Backend::Monado=>"monado",Backend::Steamvr=>"steamvr-profile",Backend::Vdxr=>"vdxr-profile"});std::fs::create_dir_all(&profile).unwrap();
+            files.steamvr_driver=None;files.openvr_runtime=None;files.ovr_bridge=None;
             if backend==Backend::Steamvr {files.steamvr_driver=Some(driver.clone());files.openvr_runtime=Some(runtime.clone());}
+            if backend==Backend::Vdxr {files.ovr_bridge=Some(exe.clone());}
             std::fs::write(profile.join("xr-windows.json"),serde_json::to_vec(&files).unwrap()).unwrap();
             command(&["--xr-windows-register".into(),"--root".into(),root.to_string_lossy().into_owned(),"--profile".into(),profile.to_string_lossy().into_owned(),"--name".into(),"Fixture".into()]).unwrap();
         }
+        assert!(games(&root).unwrap()[0].vdxr.is_some());
+        select(&root,"846470",Backend::Vdxr).unwrap();
+        assert_eq!(games(&root).unwrap()[0].backend,Backend::Vdxr);
         select(&root,"846470",Backend::Steamvr).unwrap();
         command(&["--xr-windows-register".into(),"--root".into(),root.to_string_lossy().into_owned(),"--profile".into(),root.join("monado").to_string_lossy().into_owned(),"--name".into(),"Fixture".into()]).unwrap();
         assert_eq!(games(&root).unwrap()[0].backend,Backend::Steamvr);

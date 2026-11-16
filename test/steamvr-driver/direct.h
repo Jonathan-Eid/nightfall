@@ -67,18 +67,21 @@ class DirectCapture:public vr::IVRDriverDirectModeComponent {
 public:
     DirectCapture() {
         ComPtr<IDXGIFactory1> factory;check(CreateDXGIFactory1(IID_PPV_ARGS(&factory)));
-        // NVIDIA (NVENC) first; AMD (AMF) when there is no NVIDIA GPU.
+        // Prefer existing NVIDIA/AMD paths; Intel uses QSV on its own adapter.
         ComPtr<IDXGIAdapter1> selected;
-        for(unsigned vendor:{0x10deu,0x1002u}) {
+        for(unsigned vendor:{0x10deu,0x1002u,0x8086u}) {
 #ifndef METEOR_AMF
-            if(vendor==0x1002u)break;
+            if(vendor==0x1002u)continue;
+#endif
+#ifndef METEOR_QSV
+            if(vendor==0x8086u)continue;
 #endif
             for(unsigned i=0;!selected;++i) {ComPtr<IDXGIAdapter1> candidate;if(factory->EnumAdapters1(i,&candidate)==DXGI_ERROR_NOT_FOUND)break;
                 DXGI_ADAPTER_DESC1 desc{};check(candidate->GetDesc1(&desc));
                 if(!(desc.Flags&DXGI_ADAPTER_FLAG_SOFTWARE) && desc.VendorId==vendor) {selected=candidate;std::memcpy(&adapter_luid,&desc.AdapterLuid,sizeof(adapter_luid));}}
             if(selected)break;
         }
-        if(!selected)throw std::runtime_error("SteamVR direct capture needs an NVIDIA (NVENC) or AMD (AMF) GPU");
+        if(!selected)throw std::runtime_error("SteamVR direct capture needs NVIDIA/NVENC, AMD/AMF or Intel/QSV support in this build");
         check(D3D11CreateDevice(selected.Get(),D3D_DRIVER_TYPE_UNKNOWN,nullptr,D3D11_CREATE_DEVICE_BGRA_SUPPORT,nullptr,0,D3D11_SDK_VERSION,&device,nullptr,&context));
         vr::VRDriverLog()->Log("METEOR_STEAMVR_DIRECT initialized");
     }

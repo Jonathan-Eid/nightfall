@@ -3,6 +3,9 @@
 #include <nvEncodeAPI.h>
 #include <vector>
 #include "../meteor_encoder_bitrate.h"
+#ifdef METEOR_QSV
+#include "../meteor_qsv_encoder.h"
+#endif
 #ifdef METEOR_AMF
 #include "../meteor_amf_encoder.h"
 #endif
@@ -22,6 +25,25 @@ class MirrorEncoder {
     ComPtr<ID3D11Buffer> constants;
     ComPtr<ID3D11BlendState> alpha_blend;
     unsigned width=0,height=0;
+#ifdef METEOR_QSV
+    std::unique_ptr<MeteorQsvEncoder> qsv;
+    bool qsv_first=true;
+    static bool on_intel(ID3D11Device *device) {
+        ComPtr<IDXGIDevice> dxgi;ComPtr<IDXGIAdapter> adapter;DXGI_ADAPTER_DESC desc{};
+        return SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&dxgi))) && SUCCEEDED(dxgi->GetAdapter(&adapter)) &&
+            SUCCEEDED(adapter->GetDesc(&desc)) && desc.VendorId==0x8086;
+    }
+    void initialize_qsv(ID3D11Device *device,unsigned w,unsigned h,unsigned fps) {
+        const char *codec=std::getenv("METEOR_XR_CODEC");
+        if(codec && std::strcmp(codec,"h264") && std::strcmp(codec,"h265"))throw std::runtime_error("Unsupported QSV codec");
+        uint32_t bitrate=0;
+        if(!meteor_encoder_bitrate(std::getenv("METEOR_XR_BITRATE_MBPS"),32000000,&bitrate))throw std::runtime_error("Invalid QSV bitrate");
+        qsv=std::make_unique<MeteorQsvEncoder>();
+        qsv->attach(device,packed.Get(),w*2,h,DXGI_FORMAT_B8G8R8A8_UNORM);
+        if(!qsv->start(codec && !std::strcmp(codec,"h265"),fps,bitrate,true))throw std::runtime_error("QSV initialization failed: "+qsv->error);
+        std::printf("STEAMVR_ENCODER per_eye=%ux%u fps=%u bitrate=%u graphics=D3D11 codec=%s backend=qsv\n",w,h,fps,bitrate,codec?codec:"h264");std::fflush(stdout);
+    }
+#endif
 #ifdef METEOR_AMF
     std::unique_ptr<MeteorAmfEncoder> amf;
     bool amf_first=true;
@@ -85,6 +107,9 @@ if(flags.x>0)c=lerp(12.92*c,1.055*pow(max(c,0),1.0/2.4)-.055,step(.0031308,c));r
 #ifdef METEOR_AMF
         if(on_amd(device)) {initialize_amf(device,w,h,fps);return;}
 #endif
+#ifdef METEOR_QSV
+        if(on_intel(device)) {initialize_qsv(device,w,h,fps);return;}
+#endif
         module=LoadLibraryW(L"nvEncodeAPI64.dll");if(!module)throw std::runtime_error("NVIDIA encoder driver missing");
         auto create=reinterpret_cast<NVENCSTATUS (NVENCAPI *)(NV_ENCODE_API_FUNCTION_LIST *)>(GetProcAddress(module,"NvEncodeAPICreateInstance"));
         if(!create)throw std::runtime_error("NVENC entry point missing");api.version=NV_ENCODE_API_FUNCTION_LIST_VER;nv(create(&api));
@@ -143,6 +168,14 @@ if(flags.x>0)c=lerp(12.92*c,1.055*pow(max(c,0),1.0/2.4)-.055,step(.0031308,c));r
             context->PSSetShaderResources(0,1,&view);context->Draw(3,0);
         }
         ID3D11ShaderResourceView *none=nullptr;context->PSSetShaderResources(0,1,&none);context->OMSetRenderTargets(0,nullptr,nullptr);context->Flush();
+#ifdef METEOR_QSV
+        if(qsv) {
+            std::vector<uint8_t> packet;
+            if(!qsv->encode(qsv_first,frame,[&](const uint8_t *data,uint32_t size){packet.assign(data,data+size);return true;}))
+                throw std::runtime_error("QSV encode failed: "+qsv->error);
+            qsv_first=false;return packet;
+        }
+#endif
 #ifdef METEOR_AMF
         if(amf) {
             std::vector<uint8_t> packet;

@@ -219,6 +219,12 @@ extern "C" int meteor_tracking_pose_v1(void *context,int64_t at_ns,float pose[7]
         (query>stamp ? query-stamp : stamp-query)>250000000) return 0;
     std::memcpy(pose,c->sample.pose.data(),7*sizeof(float)); *sample_ns=stamp; return 1;
 }
+// A paused/stale pose is not a disconnected headset. Keep session lifetime
+// separate from tracking validity so a short tracking interruption can recover.
+extern "C" int meteor_tracking_connected_v1(void *context) {
+    auto *client=static_cast<Client*>(context);
+    return client && client->ready.load() && !client->failed.load() && !client->stop.load();
+}
 extern "C" void meteor_tracking_stop_v1(void *context) {
     { std::lock_guard<std::mutex> lock(active_mutex); if(active_client==context) active_client=nullptr; }
     delete static_cast<Client *>(context);

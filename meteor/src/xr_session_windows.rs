@@ -10,6 +10,7 @@ pub(crate) struct Files {
     pub encoder:PathBuf,
     pub tracking:PathBuf,
     pub application:PathBuf,
+    #[serde(default)] pub ovr_bridge:Option<PathBuf>,
     #[serde(skip)] pub external_steamvr:bool,
     #[serde(default)] pub steamvr_launch_via_steam:bool,
     #[serde(default)] pub library_only:bool,
@@ -31,6 +32,11 @@ pub(crate) fn load(root:&Path)->io::Result<Files> {
     let path=root.join("xr-windows.json");
     if std::fs::metadata(&path)?.len()>16384 {return Err(io::Error::other("Windows XR configuration exceeds 16 KiB"));}
     let files:Files=serde_json::from_slice(&std::fs::read(path)?)?;
+    if let Some(bridge)=&files.ovr_bridge {
+        if !bridge.is_absolute() || !bridge.is_file() || files.steamvr_driver.is_some() || files.openvr_runtime.is_some() {
+            return Err(io::Error::other("Nightfall OVR backend requires an absolute bridge DLL and no SteamVR/OpenVR backend"));
+        }
+    }
     if let Some(runtime)=&files.openvr_runtime {
         if !runtime.is_absolute() || !runtime.join("bin/vrclient_x64.dll").is_file() {
             return Err(io::Error::other("Missing absolute Windows xrizer runtime directory"));
@@ -150,6 +156,8 @@ pub(crate) async fn runtime_adapter_with_status(
                 .env("METEOR_WINDOWS_SESSION_MARKER",&marker)
                 .stdin(Stdio::null()).stdout(Stdio::from(log.try_clone()?)).stderr(Stdio::from(log.try_clone()?));
             if bitrate_mbps!=0 {command.env("METEOR_XR_BITRATE_MBPS",bitrate_mbps.to_string());}
+            if let Some(bridge)=&files.ovr_bridge {command.env("NIGHTFALL_OVR_BRIDGE",bridge);}
+            else {command.env_remove("NIGHTFALL_OVR_BRIDGE");}
             if files.pixel_probe {command.env("METEOR_WINDOWS_PIXEL_PROBE","1").env_remove("METEOR_XR_TRACKED_SCENE");}
             else {command.env_remove("METEOR_WINDOWS_PIXEL_PROBE").env("METEOR_XR_TRACKED_SCENE","1");}
             if files.async_delivery {command.env("METEOR_XR_ASYNC_DELIVERY","1");}
@@ -175,6 +183,7 @@ pub(crate) async fn runtime_adapter_with_status(
             Ok(())
         };
         let mut service=Command::new(&files.service); configure(&mut service)?;
+        if files.ovr_bridge.is_some() {service.arg("--service");}
         if files.steamvr_driver.is_some() && crate::xr_steamvr_windows::available() {
             service.env_remove("METEOR_STEAMVR_TRIAL");
         }
@@ -376,7 +385,7 @@ mod tests {
             if std::env::var_os("NIGHTFALL_WINDOWS_XR_STEAM_WRAPPER").is_some() {
                 steam_broker=Some(crate::xr_steam_windows::start_broker(&root).unwrap());
                 let game=crate::xr_windows::games(&root).unwrap().into_iter().find(|g|g.app_id==app_id).unwrap();
-                let profile=match game.backend {crate::xr_windows::Backend::Monado=>game.monado.unwrap(),crate::xr_windows::Backend::Steamvr=>game.steamvr.unwrap()};
+            let profile=match game.backend {crate::xr_windows::Backend::Monado=>game.monado.unwrap(),crate::xr_windows::Backend::Steamvr=>game.steamvr.unwrap(),crate::xr_windows::Backend::Vdxr=>game.vdxr.unwrap()};
                 let files=load(&profile).unwrap();
                 let mut command=vec![files.application.to_string_lossy().into_owned()];command.extend(files.arguments);
                 let cwd=files.application.parent().unwrap().to_path_buf();let request_root=root.clone();let id=app_id.clone();

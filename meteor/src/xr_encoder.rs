@@ -68,13 +68,14 @@ impl Monitor {
         self.value.clone()
     }
 }
-/// The Windows encoder DLL's report: {"backend":"nvenc"|"amf","codecs":[...],"max_frame":[w,h]}.
+/// Windows encoder report: {"backend":"nvenc"|"amf"|"qsv","codecs":[...],"max_frame":[w,h]}.
 #[cfg_attr(not(windows),allow(dead_code))]
 fn parse_reported(json:&str)->Option<Capabilities> {
     #[derive(Deserialize)]
     struct Reported {backend:String,codecs:Vec<String>,#[serde(default)] max_frame:Option<[u32;2]>}
     let reported:Reported=serde_json::from_str(json).ok()?;
-    if !matches!(reported.backend.as_str(),"nvenc"|"amf") || reported.codecs.is_empty() {return None;}
+    if !matches!(reported.backend.as_str(),"nvenc"|"amf"|"qsv") || reported.codecs.is_empty()
+        || reported.codecs.iter().any(|codec|!matches!(codec.as_str(),"h264"|"h265")) {return None;}
     Some(Capabilities {backend:reported.backend,foveated_encoding:false,live_bitrate:false,codecs:reported.codecs,
         max_frame:reported.max_frame.filter(|[w,h]|*w>0 && *h>0),error:None})
 }
@@ -92,14 +93,14 @@ mod windows_dll {
         let wide:Vec<u16>=dll.as_os_str().encode_wide().chain(Some(0)).collect();
         // SAFETY: a NUL-terminated path; the module is freed below, after the call returns.
         let module=unsafe {LoadLibraryExW(wide.as_ptr(),std::ptr::null_mut(),LOAD_WITH_ALTERED_SEARCH_PATH)};
-        if module.is_null() {return None;}
+        if module.is_null() {return Some(String::new());}
         // SAFETY: the export's signature is fixed by the encoder DLL's ABI.
         let result=unsafe {GetProcAddress(module,c"meteor_encoder_capabilities_v1".as_ptr().cast())}.map(|f|{
             let function:CapabilitiesFn=unsafe {std::mem::transmute(f)};
             let mut buffer=vec![0u8;512];
             let length=unsafe {function(buffer.as_mut_ptr(),buffer.len() as u32)} as usize;
-            (length>0 && length<buffer.len()).then(||String::from_utf8_lossy(&buffer[..length]).into_owned())
-        }).flatten();
+            if length>0 && length<buffer.len() {String::from_utf8_lossy(&buffer[..length]).into_owned()}else{String::new()}
+        });
         // SAFETY: nothing from the module outlives this call.
         unsafe {FreeLibrary(module)};
         result
@@ -123,5 +124,10 @@ mod tests {
         assert!(nvenc.fits_eyes(4096,4096));
         assert!(parse_reported(r#"{"backend":"amf","codecs":[]}"#).is_none());
         assert!(parse_reported("not json").is_none());
+        let qsv=parse_reported(r#"{"backend":"qsv","codecs":["h264","h265"],"max_frame":[4096,4096]}"#).unwrap();
+        assert_eq!(qsv.backend,"qsv");
+        assert!(!qsv.foveated_encoding && !qsv.live_bitrate);
+        assert!(qsv.fits_eyes(1280,1344) && !qsv.fits_eyes(2064,2208));
+        assert!(parse_reported(r#"{"backend":"qsv","codecs":["av1"]}"#).is_none());
     }
 }

@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import socket
 import subprocess
+import sys
 import time
 
 
@@ -27,7 +28,10 @@ def main():
     parser.add_argument('--codec', choices=['h264', 'h265'], default='h264')
     parser.add_argument('--frames', type=int, default=24)
     parser.add_argument('--quad', action='store_true')
+    parser.add_argument('--gpu', action='store_true', help='Use the GPU performance probe wrapper')
     args = parser.parse_args()
+    if args.quad and args.gpu:
+        parser.error('--quad pixel-reference checks and --gpu measurement are separate fixtures')
     if not 1 <= args.frames <= 240:
         parser.error('frames must be 1..240')
     build, runtime, out = args.build.resolve(), args.runtime.resolve(), args.output.resolve()
@@ -57,7 +61,7 @@ def main():
     if args.quad:
         env['METEOR_XR_QUAD_FIXTURE'] = '1'
     children, files = [], []
-    result = {'success': False, 'synthetic_tracking': True, 'codec': args.codec,
+    result = {'success': False, 'synthetic_tracking': True, 'gpu_measurement': args.gpu, 'codec': args.codec,
               'dimensions': [2560, 1344], 'requested_frames': args.frames, 'quad': args.quad}
 
     def start(name, command):
@@ -85,7 +89,11 @@ def main():
         ready(publisher, 'tracking', 'Synthetic tracking fixture listening')
         sink = start('sink', [build / 'wire-sink.exe', video_port, out / ('stream.' + args.codec), '.5'])
         ready(sink, 'sink', 'wire_sink_port=')
-        probe = start('probe', [build / 'probe/Release/meteor-runtime-probe.exe'])
+        command = [build / 'probe/Release/meteor-runtime-probe.exe']
+        if args.gpu:
+            command = [sys.executable, Path(__file__).with_name('windows_vdxr_gpu_probe.py'),
+                       '--build', build, '--frames', str(args.frames), '--timeout', '60']
+        probe = start('probe', command)
         result['probe_exit'] = probe.wait(timeout=60)
         if result['probe_exit']:
             raise RuntimeError('OpenXR probe failed; see probe.err')

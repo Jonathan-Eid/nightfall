@@ -129,11 +129,34 @@ a new output directory. It writes `summary.json` and retains matching logs and
 bitstream. The wire sink is built from `test/windows_xr_wire_sink.rs`.
 The smoke test's `--quad` pixel checks require the test-only Python `av` package.
 
-These are hardware encoding and native OpenXR/transport checks with synthetic
-tracking, not headset presentation or performance benchmarks. The official
-Nightfall preview client was installed on the connected Quest 2; a complete
-Nightfall client/host pairing and headset display acceptance are still pending.
-Its stock release build does not expose the development control bridge in this
-session. No sustained delivery-rate, motion-to-photon latency, comfort, game
-compatibility, other Intel GPU, Linux Intel, AV1, or conformance claim is made.
+Those checks use synthetic tracking. On November 16, 2026, the stock
+0.9.1-preview.1 Quest 2 client also paired with the Windows host and entered the
+standalone VDXR session using real headset tracking. The user confirmed the 3D
+scene was visible and smoother after the pacing change. A 3,600-frame GPU scene
+trial drained all 3,600 packets without transport failure and acknowledged END.
+
+At 100% Quest 2 resolution (1840×1920 per eye after alignment), the synchronous
+path delivered about 35 FPS before, and about 45 FPS after, the matching VDXR
+change to consume refresh ticks that arrived while rendering/encoding. These
+are single headset trials, not controlled benchmarks or a stable 72 FPS claim.
+The current client/control/wire protocol accepts only 20/60/72 Hz; enabling
+90 Hz requires coordinated client, host, transport and runtime changes.
+
+For physical performance trials, `test/windows_vdxr_gpu_probe.py` can wrap the
+native probe as a registered application's Python script. Pass `--build` with
+the directory containing `probe/`, plus a bounded `--frames` and `--timeout`.
+Keep the normal session-specific environment supplied by Meteor. This wrapper
+enables GPU measurement mode: without `METEOR_XR_GPU_MEASURE=1`, the native probe
+generates CPU references, reads images back and appends raw eye images to disk,
+which makes it unsuitable for measuring streaming performance.
+
+Pair the stock client with the host's normal HTTP/HTTPS ports before streaming
+through Meteor's proxy. A firewall restricted to the proxy alone prevents the
+initial PIN exchange. Scope host pairing and proxy rules separately by program,
+protocol, required ports, network interface/profile and client address.
+
+The stock release does not expose the development control bridge in this
+session. Motion-to-photon latency, comfort, controller calibration/haptics,
+additional games, other Intel GPUs, Linux Intel, AV1, 90 Hz and conformance
+remain unvalidated.
 

@@ -1,0 +1,125 @@
+name: Android tag APK
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: APK version for a manual build (without the v prefix)
+        default: 0.0.1-ci
+        required: true
+        type: string
+      prepare_only:
+        description: Check downloaded build inputs without compiling the APK
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-apk-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  apk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      NIGHTFALL_BUILD_JOBS: '4'
+      NIGHTFALL_CI_CACHE: ${{ github.workspace }}/.build-cache/ci-android
+      APK_VERSION: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate version
+        run: |
+          source tools/build_support/app_version.sh
+          APK_VERSION="${APK_VERSION#v}"
+          code="$(nightfall_version_code "$APK_VERSION")"
+          if (( code < 1 || code > 2100000000 )); then
+            echo 'Version code is outside Android bounds' >&2
+            exit 1
+          fi
+          echo "APK_VERSION=$APK_VERSION" >> "$GITHUB_ENV"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install native build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes build-essential ninja-build pkg-config curl unzip zip \
+            autoconf automake libtool nasm yasm gettext bison flex gperf glslc \
+            libx11-dev libxcursor-dev libxinerama-dev libxi-dev libxrandr-dev \
+            libgl1-mesa-dev libglu1-mesa-dev libasound2-dev libpulse-dev \
+            libudev-dev libwayland-dev libxkbcommon-dev libfontconfig1-dev libvulkan-dev
+          python -m pip install scons==4.9.1 cmake==3.31.6
+      - uses: android-actions/setup-android@v3
+      - name: Install pinned Rust for the Android browser blocker
+        run: |
+          rustup toolchain install 1.92.0 --profile minimal --target aarch64-linux-android
+          rustup override set 1.92.0
+      - name: Install matching Android SDK and NDK
+        run: |
+          source tools/build_support/native_xr_versions.sh
+          sdkmanager --install 'platform-tools' 'platforms;android-36' 'build-tools;36.1.0' \
+            "ndk;$NIGHTFALL_ANDROID_NDK_VERSION"
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/$NIGHTFALL_ANDROID_NDK_VERSION" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NIGHTFALL_ANDROID_NDK_VERSION" >> "$GITHUB_ENV"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .build-cache/ci-android/downloads
+            ~/.cache/vcpkg/archives
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: android-inputs-${{ runner.os }}-${{ hashFiles('tools/ci/android-inputs.sha256', '**/vcpkg*.json', 'tools/build_support/native_xr_versions.sh', 'extensions/browser-adblock/Cargo.lock') }}
+      - name: Prepare pinned Android build inputs
+        env:
+          PREPARE_ONLY: ${{ inputs.prepare_only || false }}
+        run: |
+          if [[ "$PREPARE_ONLY" == true ]]; then
+            bash tools/ci/prepare_android.sh --downloads-only
+          else
+            bash tools/ci/prepare_android.sh
+          fi
+      - name: Build unsigned release APK
+        if: ${{ !inputs.prepare_only }}
+        run: bash build.sh --release --unsigned --version "$APK_VERSION"
+      - name: Verify and collect APK and installation instructions
+        if: ${{ !inputs.prepare_only }}
+        run: |
+          apk=Nightfall-Android-arm64-v8a-unsigned.apk
+          tools="$ANDROID_HOME/build-tools/36.1.0"
+          test -x "$tools/apksigner"
+          unzip -tq "$apk"
+          if "$tools/apksigner" verify "$apk" >/dev/null 2>&1; then
+            echo 'Expected an unsigned APK, but signature verification succeeded' >&2
+            exit 1
+          fi
+          badging="$("$tools/aapt" dump badging "$apk")"
+          printf '%s\n' "$badging" | sed -n '1p'
+          if [[ "$badging" != *"versionName='$APK_VERSION'"* ]]; then
+            echo 'APK version does not match the requested tag/version' >&2
+            exit 1
+          fi
+          mkdir -p build/ci-apk
+          cp "$apk" "build/ci-apk/Nightfall-$APK_VERSION-arm64-v8a-unsigned.apk"
+          cp docs/guides/install-tagged-apk.md build/ci-apk/INSTALL-QUEST.md
+          (cd build/ci-apk && sha256sum -- *.apk > SHA256SUMS)
+      - uses: actions/upload-artifact@v4
+        if: ${{ !inputs.prepare_only }}
+        with:
+          name: Nightfall-${{ env.APK_VERSION }}-arm64-v8a-unsigned
+          path: build/ci-apk/
+          if-no-files-found: error
+          retention-days: 30

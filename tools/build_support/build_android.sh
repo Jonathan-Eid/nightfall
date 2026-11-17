@@ -19,6 +19,15 @@ OUTPUT="$2"
 USE_STOCK_LITERT="${NIGHTFALL_USE_STOCK_LITERT:-0}"
 INSTALL="${NIGHTFALL_INSTALL:-0}"
 BUILD_KIND="${NIGHTFALL_BUILD_KIND:-debug}"
+UNSIGNED_RELEASE="${NIGHTFALL_UNSIGNED_RELEASE:-0}"
+if [[ "$UNSIGNED_RELEASE" != 0 && "$UNSIGNED_RELEASE" != 1 ]]; then
+  echo "NIGHTFALL_UNSIGNED_RELEASE must be 0 or 1" >&2
+  exit 1
+fi
+if [[ "$UNSIGNED_RELEASE" == 1 && ( "$BUILD_KIND" != release || "${INSTALL:-0}" == 1 ) ]]; then
+  echo "Unsigned APKs require a release build and cannot be installed before signing" >&2
+  exit 1
+fi
 nightfall_resolve_version "$BUILD_KIND" "$SCRIPT_DIR"
 echo "Version $NIGHTFALL_VERSION_NAME (code $NIGHTFALL_VERSION_CODE)"
 GODOT="${NIGHTFALL_GODOT_EDITOR:?Set NIGHTFALL_GODOT_EDITOR to a Godot 4.7 executable}"
@@ -123,7 +132,14 @@ if [ "$PCVR_ALVR" = "ON" ]; then
     -e 's/^permissions\/wake_lock=false$/permissions\/wake_lock=true/' "$CONFIG"
 fi
 
-if [ "$PRESET" = "NightfallRelease" ]; then
+if [[ "$PRESET" == NightfallRelease && "$UNSIGNED_RELEASE" == 1 ]]; then
+  # Keep signing keys outside CI. Godot/Gradle export a release APK which the
+  # owner signs locally; never substitute credentials or use a throwaway key.
+  sed -i -e 's/^package\/signed=true$/package\/signed=false/' \
+    -e 's/^keystore\/release=.*$/keystore\/release=""/' \
+    -e 's/^keystore\/release_user=.*$/keystore\/release_user=""/' \
+    -e 's/^keystore\/release_password=.*$/keystore\/release_password=""/' "$CONFIG"
+elif [ "$PRESET" = "NightfallRelease" ]; then
   RELEASE_ENV_FILE="${NIGHTFALL_ENV_FILE:-.env}"
   if [ ! -f "$RELEASE_ENV_FILE" ]; then
     echo "Error: release env file not found at $RELEASE_ENV_FILE"

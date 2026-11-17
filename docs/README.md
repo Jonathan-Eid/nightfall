@@ -39,6 +39,7 @@ as outstanding.
 
 ## Technical guides
 
+- [Install a tagged Nightfall APK on Quest](guides/install-tagged-apk.md)
 - [Screen crop, colour key and placement](guides/screen-display-options.md)
 - [Meteor managed-host releases](guides/meteor-host-releases.md)
 

@@ -199,6 +199,7 @@ The `build.sh` script handles everything:
 git tag v0.7.12 && ./build.sh --release
 ./build.sh --release --version 0.7.12   # before tagging
 ./build.sh --release --version 0.8.2-preview.1  # optimized prerelease
+./build.sh --release --unsigned --version 0.8.2  # no keystore; sign locally before installing
 
 # Build and install via ADB
 ./build.sh --dev --install
@@ -207,7 +208,24 @@ git tag v0.7.12 && ./build.sh --release
 ./build.sh --appimage
 ```
 
-### Versions
+### Tagged APK builds on GitHub Actions
+
+The **Android tag APK** workflow runs when a `v*` version tag is pushed (for
+example, `git push fork v0.9.2`). Tag the commit containing the workflow. It
+validates the version, downloads checksum-pinned inputs, builds the patched
+Godot runtime and streaming extension, and exports an **unsigned ARM64 release
+APK** without access to a signing key. Download the artifact from the successful
+Actions run; it contains the APK, checksums, and
+[Quest signing/installation instructions](docs/guides/install-tagged-apk.md).
+No GitHub Release is automatically created or published.
+
+The workflow can also be run manually with a version. **Prepare only** validates
+downloaded dependencies without compiling; it does not produce an APK. A full
+clean build compiles Godot and native dependencies and can take considerably
+longer than a cached build. The workflow does not enable development-only
+PCVR/ALVR features or distribute the separate USB Test app/signing key.
+
+### Version names and codes
 
 `build.sh` writes the APK's `versionName` and `versionCode` at export time;
 `export_presets.cfg` itself keeps placeholders. The code is

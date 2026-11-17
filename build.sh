@@ -10,6 +10,7 @@ BUILD_KIND="debug"
 PLATFORM="android"
 USE_STOCK_LITERT=0
 VERSION=""
+UNSIGNED=0
 
 while [[ "$#" -gt 0 ]]; do
   arg="$1"
@@ -18,6 +19,7 @@ while [[ "$#" -gt 0 ]]; do
     --release) PRESET="NightfallRelease"; BUILD_KIND="release"; OUTPUT="Nightfall-Android-arm64-v8a.apk" ;;
     --dev)     PRESET="NightfallRelease"; BUILD_KIND="dev";     OUTPUT="Nightfall-Android-arm64-v8a-dev.apk" ;;
     --debug)   PRESET="NightfallDev";     BUILD_KIND="debug";   OUTPUT="Nightfall-Android-arm64-v8a-debug.apk" ;;
+    --unsigned) UNSIGNED=1 ;;
     --version)
       [[ "$#" -gt 0 ]] || { echo "--version needs a value, e.g. --version 0.7.12"; exit 1; }
       VERSION="${1#v}"
@@ -27,12 +29,13 @@ while [[ "$#" -gt 0 ]]; do
     --stock-litert) USE_STOCK_LITERT=1 ;;
     --install) INSTALL=1 ;;
     --help|-h)
-      echo "Usage: $0 [--debug|--dev|--release [--version X.Y.Z]] [--linux|--appimage] [--stock-litert] [--install]"
+      echo "Usage: $0 [--debug|--dev|--release [--version X.Y.Z] [--unsigned]] [--linux|--appimage] [--stock-litert] [--install]"
       echo "  --debug     Export debug APK (default)"
       echo "  --dev       Export a release-signed APK for testing. It keeps the last release's"
       echo "              version code, so each dev build replaces the previous one"
       echo "  --release   Export release APK (requires .env keystore config). Its version comes"
       echo "              from the tag on HEAD (vX.Y.Z), or from --version"
+      echo "  --unsigned  Export an unsigned Android release APK without a keystore; sign locally before installing"
       echo "  --linux     Export Linux x86_64 binary"
       echo "  --appimage  Export Linux x86_64 AppImage (implies --release for Linux)"
       echo "  --stock-litert  Use stock-priority LiteRT GPU instead of the default low-priority Quest build"
@@ -41,6 +44,13 @@ while [[ "$#" -gt 0 ]]; do
     *) echo "Unknown option: $arg"; exit 1 ;;
   esac
 done
+if [[ "$UNSIGNED" == 1 ]]; then
+  if [[ "$BUILD_KIND" != release || "$PLATFORM" != android || "${INSTALL:-0}" == 1 ]]; then
+    echo "--unsigned requires --release on Android and cannot be combined with --install" >&2
+    exit 1
+  fi
+  OUTPUT="Nightfall-Android-arm64-v8a-unsigned.apk"
+fi
 if [[ -n "$VERSION" && "$BUILD_KIND" != "release" ]]; then
   echo "--version only applies to --release; dev and debug builds take the last release's version"
   exit 1
@@ -62,6 +72,7 @@ else
     NIGHTFALL_USE_STOCK_LITERT="$USE_STOCK_LITERT" \
     NIGHTFALL_INSTALL="${INSTALL:-0}" \
     NIGHTFALL_BUILD_KIND="$BUILD_KIND" \
+    NIGHTFALL_UNSIGNED_RELEASE="$UNSIGNED" \
     NIGHTFALL_VERSION="$VERSION" \
     bash "$SCRIPT_DIR/tools/build_support/build_android.sh" "$PRESET" "$OUTPUT"
 fi

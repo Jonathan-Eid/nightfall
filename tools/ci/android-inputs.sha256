@@ -1,0 +1,17 @@
+# Official Godot 4.7 stable Linux editor and full export-template archive.
+0b1a6c54c2c619c12e169fe9241edda4b81080b519451cec2984bf0d2c6cb73c  Godot_v4.7-stable_linux.x86_64.zip
+9714459dc071907c0f3d5f17d608faf69e7cda21331fc5d39c4503ffa4e99eec  Godot_v4.7-stable_export_templates.tpz
+
+# GodotVR GodotOpenXRVendors v5.2.0-stable addon release.
+2a3958fff0de2dbdc4f1a036b5e4cfcea12ae7e45f8deebf4b45e5e9718c4e35  godotopenxrvendorsaddon.zip
+
+# Production Android depth models from tB0nE/nightfall edgepad-models-2026-10-08.
+bcca2459c6e97b7bd15c009175fd7372b320522d70627f958590a4385576cbf4  zipdepth-base-256-cpu.tflite
+8a636c3551e35886172811e41a03a2b6e5c8e3398037a0a0b58ca25a3332076f  zipdepth-base-256-standard-packed-conv4-reduceconv-edgepad-gpu.tflite
+4db1d7ed7d0f6883124be97b7ef02e5ebed2e442b4d59240eeeaedf8135169c6  zipdepth-base-384-cpu.tflite
+6a2f5b073f2650768c74921156dad07c7c61006920f41f89baa52e076a3aef25  zipdepth-base-384-standard-packed-conv4-reduceconv-edgepad-gpu.tflite
+dfa40c15155df2a7ae2eb2ccdf78da610ae4722b1cc388fa93e6888bcc78d0df  zipdepth-wide-512x288-edgepad-gpu.tflite
+
+# Large checked-in runtime dependencies, also checked by build_android.sh where applicable.
+f8b5ac0eb523b307d7d7cb4e024941f0cf64fd9a12f72726ed2d6d7e81928700  litert-gpu-nightfall-1.4.2.aar
+5a6bff397dfff2be10e54795fdb15330d8caa22dee6c21ed6097b2dfab1048e5  libpyrowave-shared.so

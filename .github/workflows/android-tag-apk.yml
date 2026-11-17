@@ -53,6 +53,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install native build tools
+        if: ${{ !inputs.prepare_only }}
         run: |
           sudo apt-get update
           sudo apt-get install --yes build-essential ninja-build pkg-config curl unzip zip \
@@ -62,7 +63,11 @@ jobs:
             libudev-dev libwayland-dev libxkbcommon-dev libfontconfig1-dev libvulkan-dev
           python -m pip install scons==4.9.1 cmake==3.31.6
       - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
       - name: Install pinned Rust for the Android browser blocker
+        if: ${{ !inputs.prepare_only }}
         run: |
           rustup toolchain install 1.92.0 --profile minimal --target aarch64-linux-android
           rustup override set 1.92.0

@@ -430,4 +430,3 @@ test, a 12-frame 90 Hz decoded quad geometry/alpha/eye-visibility test with the
 and a 12-frame 72 Hz quad check with explicit 1.0 compatibility. All delivered
 clean END. `test/smoke_windows_vdxr.py --fov-scale 1.15` selects the expanded
 reference geometry; its default 1.0 keeps historical fixtures unchanged.
-

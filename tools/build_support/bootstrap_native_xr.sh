@@ -184,20 +184,29 @@ if [[ -z "${CC:-}" && -z "${CXX:-}" ]] \
   HOST_BUILD_PATH="/usr/bin:$PATH"
 fi
 
-echo "Building patched Godot editor..."
-PATH="$HOST_BUILD_PATH" scons -C "$GODOT_SOURCE" platform=linuxbsd target=editor \
-  use_static_cpp=no -j"$JOBS"
-
-GODOT_EDITOR=""
-for candidate in "$GODOT_SOURCE"/bin/godot.linuxbsd.editor.*; do
-  if [[ -x "$candidate" ]]; then
-    GODOT_EDITOR="$candidate"
-    break
+GODOT_EDITOR="${NIGHTFALL_GODOT_API_EDITOR:-}"
+if [[ -n "$GODOT_EDITOR" ]]; then
+  # CI needs standard OpenXR bindings; custom engine methods are called
+  # dynamically. The matching official editor supplies those bindings without
+  # rebuilding a Linux engine. The patched Android runtime is still compiled.
+  version="$("$GODOT_EDITOR" --headless --version)"
+  expected_version="${NIGHTFALL_GODOT_TEMPLATE_VERSION/.stable/.stable.official}.${NIGHTFALL_PINNED_GODOT_COMMIT:0:9}"
+  if [[ "$version" != "$expected_version"* ]]; then
+    echo "API editor mismatch: expected $expected_version, got $version" >&2
+    exit 1
   fi
-done
-if [[ -z "$GODOT_EDITOR" ]]; then
-  echo "Patched Godot editor was not produced under $GODOT_SOURCE/bin" >&2
-  exit 1
+  echo "Using pinned API editor: $version (skipping Linux editor compilation)"
+else
+  echo "Building patched Godot editor..."
+  PATH="$HOST_BUILD_PATH" scons -C "$GODOT_SOURCE" platform=linuxbsd target=editor \
+    use_static_cpp=no -j"$JOBS"
+  for candidate in "$GODOT_SOURCE"/bin/godot.linuxbsd.editor.*; do
+    if [[ -x "$candidate" ]]; then GODOT_EDITOR="$candidate"; break; fi
+  done
+  if [[ -z "$GODOT_EDITOR" ]]; then
+    echo "Patched Godot editor was not produced under $GODOT_SOURCE/bin" >&2
+    exit 1
+  fi
 fi
 
 EXPECTED_API_STAMP="Godot $NIGHTFALL_PINNED_GODOT_COMMIT / godot-cpp $NIGHTFALL_PINNED_GODOT_CPP_COMMIT"

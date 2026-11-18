@@ -46,7 +46,8 @@ case "${1:-}" in
       echo 'Reusing verified compiled native-XR release toolchain; no engine rebuild.'
     else
       echo 'Compiled native-XR cache is missing or invalid; building release toolchain.'
-      NIGHTFALL_NATIVE_XR_CACHE="$NATIVE_ROOT" bash "$PROJECT_ROOT/tools/build_support/bootstrap_native_xr.sh" --release-only
+      NIGHTFALL_GODOT_API_EDITOR="${NIGHTFALL_GODOT_EDITOR:-}" \
+        NIGHTFALL_NATIVE_XR_CACHE="$NATIVE_ROOT" bash "$PROJECT_ROOT/tools/build_support/bootstrap_native_xr.sh" --release-only
       manifest > "$MANIFEST"
       valid || { echo 'Native-XR toolchain validation failed' >&2; exit 1; }
     fi

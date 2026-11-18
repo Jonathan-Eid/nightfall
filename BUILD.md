@@ -240,6 +240,13 @@ developer bootstrap still builds debug and release by default. An initial cache
 fill, changed toolchain inputs, or cache eviction still requires a cold build
 on main. No warm-build timing or full APK acceptance is implied by unit checks.
 
+CI uses the checksum-pinned official editor to generate standard OpenXR bindings
+without compiling a Linux editor. Custom patched engine methods are accessed
+through dynamic calls in the native extensions; typed access to those added
+methods would require the patched API dump. The Android runtime still receives
+all engine patches. Developer bootstrap builds the patched editor by default;
+`NIGHTFALL_GODOT_API_EDITOR` explicitly selects the matching official editor.
+
 ### Version names and codes
 
 `build.sh` writes the APK's `versionName` and `versionCode` at export time;

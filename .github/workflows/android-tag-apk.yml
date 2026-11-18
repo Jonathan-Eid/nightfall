@@ -55,9 +55,17 @@ jobs:
       - name: Install native build tools
         if: ${{ !inputs.prepare_only }}
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes build-essential ninja-build pkg-config curl unzip zip \
-            autoconf automake libtool nasm yasm gettext bison flex gperf glslc
+          packages=(build-essential ninja-build pkg-config curl unzip zip
+            autoconf automake libtool nasm yasm gettext bison flex gperf glslc)
+          missing=()
+          for package in "${packages[@]}"; do
+            status="$(dpkg-query -W -f='${db:Status-Status}' "$package" 2>/dev/null || true)"
+            [[ "$status" == installed ]] || missing+=("$package")
+          done
+          if (( ${#missing[@]} )); then
+            sudo apt-get update
+            sudo apt-get install --yes --no-install-recommends "${missing[@]}"
+          fi
           python -m pip install scons==4.9.1 cmake==3.31.6
       - uses: android-actions/setup-android@v3
         with:

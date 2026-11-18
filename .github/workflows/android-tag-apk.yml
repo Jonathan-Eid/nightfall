@@ -57,10 +57,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes build-essential ninja-build pkg-config curl unzip zip \
-            autoconf automake libtool nasm yasm gettext bison flex gperf glslc \
-            libx11-dev libxcursor-dev libxinerama-dev libxi-dev libxrandr-dev \
-            libgl1-mesa-dev libglu1-mesa-dev libasound2-dev libpulse-dev \
-            libudev-dev libwayland-dev libxkbcommon-dev libfontconfig1-dev libvulkan-dev
+            autoconf automake libtool nasm yasm gettext bison flex gperf glslc
           python -m pip install scons==4.9.1 cmake==3.31.6
       - uses: android-actions/setup-android@v3
         with:

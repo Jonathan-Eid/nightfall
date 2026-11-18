@@ -225,6 +225,21 @@ clean build compiles Godot and native dependencies and can take considerably
 longer than a cached build. The workflow does not enable development-only
 PCVR/ALVR features or distribute the separate USB Test app/signing key.
 
+Run the workflow manually on **main** once with **Prepare only** off to seed
+the compiled caches. GitHub lets tags restore default-branch caches, but caches
+created on one tag are unavailable to other tags. Tag builds require the shared
+native cache and fail quickly with setup instructions if it is missing.
+
+The compiled Godot release runtime, generated API/headers and release godot-cpp
+bindings are cached by engine commits, patches, NDK and bootstrap inputs. Warm
+hits verify checksums and runtime build stamps and skip the engine build. The
+cache is saved immediately after toolchain compilation, before application
+builds. Completed vcpkg binary packages are saved separately even when a later
+build step fails. CI builds only release runtimes/bindings/dependencies; the
+developer bootstrap still builds debug and release by default. An initial cache
+fill, changed toolchain inputs, or cache eviction still requires a cold build
+on main. No warm-build timing or full APK acceptance is implied by unit checks.
+
 ### Version names and codes
 
 `build.sh` writes the APK's `versionName` and `versionCode` at export time;

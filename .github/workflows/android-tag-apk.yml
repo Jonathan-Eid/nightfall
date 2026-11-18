@@ -89,14 +89,58 @@ jobs:
             ~/.cargo/git
           key: android-inputs-${{ runner.os }}-${{ hashFiles('tools/ci/android-inputs.sha256', '**/vcpkg*.json', 'tools/build_support/native_xr_versions.sh', 'extensions/browser-adblock/Cargo.lock') }}
       - name: Prepare pinned Android build inputs
+        run: bash tools/ci/prepare_android.sh --downloads-only
+      - name: Compute native toolchain cache key
+        id: native_key
+        if: ${{ !inputs.prepare_only }}
+        run: echo "key=android-native-ubuntu24-${{ runner.arch }}-$(bash tools/ci/native_xr_cache.sh fingerprint)" >> "$GITHUB_OUTPUT"
+      - name: Restore compiled native toolchain
+        id: native_cache
+        if: ${{ !inputs.prepare_only }}
+        uses: actions/cache/restore@v4
+        with:
+          path: .build-cache/ci-android/native-xr-release.tar.gz
+          key: ${{ steps.native_key.outputs.key }}
+      - name: Build or reuse native release toolchain
+        if: ${{ !inputs.prepare_only }}
         env:
-          PREPARE_ONLY: ${{ inputs.prepare_only || false }}
+          REF_TYPE: ${{ github.ref_type }}
+          NATIVE_CACHE_HIT: ${{ steps.native_cache.outputs.cache-hit }}
         run: |
-          if [[ "$PREPARE_ONLY" == true ]]; then
-            bash tools/ci/prepare_android.sh --downloads-only
-          else
-            bash tools/ci/prepare_android.sh
+          if [[ "$REF_TYPE" == tag && "$NATIVE_CACHE_HIT" != true ]]; then
+            echo 'Shared native cache is missing. Run this workflow manually on main once to seed it.' >&2
+            exit 1
           fi
+          bash tools/ci/native_xr_cache.sh restore
+          bash tools/ci/native_xr_cache.sh ensure
+      - name: Pack compiled native toolchain
+        if: ${{ !inputs.prepare_only && steps.native_cache.outputs.cache-hit != 'true' }}
+        run: bash tools/ci/native_xr_cache.sh pack
+      - name: Save compiled toolchain before building the app
+        if: ${{ !inputs.prepare_only && steps.native_cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: .build-cache/ci-android/native-xr-release.tar.gz
+          key: ${{ steps.native_key.outputs.key }}
+      - name: Restore compiled vcpkg dependencies
+        id: vcpkg_cache
+        if: ${{ !inputs.prepare_only }}
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/vcpkg/archives
+          key: android-vcpkg-release-${{ runner.arch }}-${{ hashFiles('addons/nightfall-stream/vcpkg*.json', 'addons/nightfall-stream/vcpkg-overlay/**', 'vcpkg-overlay/**/*.cmake', 'tools/build_support/native_xr_versions.sh') }}-${{ github.run_id }}
+          restore-keys: |
+            android-vcpkg-release-${{ runner.arch }}-${{ hashFiles('addons/nightfall-stream/vcpkg*.json', 'addons/nightfall-stream/vcpkg-overlay/**', 'vcpkg-overlay/**/*.cmake', 'tools/build_support/native_xr_versions.sh') }}-
+      - name: Build release streaming library
+        id: stream
+        if: ${{ !inputs.prepare_only }}
+        run: bash tools/ci/prepare_android.sh --stream-only
+      - name: Save completed vcpkg packages even if a later build fails
+        if: ${{ !cancelled() && !inputs.prepare_only && steps.stream.outcome != 'skipped' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/vcpkg/archives
+          key: ${{ steps.vcpkg_cache.outputs.cache-primary-key }}
       - name: Build unsigned release APK
         if: ${{ !inputs.prepare_only }}
         run: bash build.sh --release --unsigned --version "$APK_VERSION"

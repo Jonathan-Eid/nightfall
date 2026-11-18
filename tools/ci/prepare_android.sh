@@ -6,12 +6,17 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 # shellcheck source=../build_support/native_xr_versions.sh
 source "$SCRIPT_DIR/../build_support/native_xr_versions.sh"
 DOWNLOADS_ONLY=0
+STREAM_ONLY=0
 if [[ "${1:-}" == "--downloads-only" ]]; then
   DOWNLOADS_ONLY=1
   shift
 fi
+if [[ "${1:-}" == "--stream-only" && "$DOWNLOADS_ONLY" == 0 ]]; then
+  STREAM_ONLY=1
+  shift
+fi
 if [[ $# -ne 0 ]]; then
-  echo "Usage: $0 [--downloads-only]" >&2
+  echo "Usage: $0 [--downloads-only | --stream-only]" >&2
   exit 2
 fi
 
@@ -23,6 +28,37 @@ for command in curl sha256sum unzip tar git python3; do require_command "$comman
 CACHE_ROOT="${NIGHTFALL_CI_CACHE:-$PROJECT_ROOT/.build-cache/ci-android}"
 DOWNLOAD_DIR="$CACHE_ROOT/downloads"
 mkdir -p "$DOWNLOAD_DIR"
+
+build_stream() {
+  VCPKG_BASELINE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["default-registry"]["baseline"])' "$PROJECT_ROOT/addons/nightfall-stream/vcpkg-configuration.json")"
+  VCPKG_ROOT="${VCPKG_ROOT:-$CACHE_ROOT/vcpkg}"
+  export VCPKG_ROOT
+  NIGHTFALL_BUILD_JOBS="${NIGHTFALL_BUILD_JOBS:-4}"
+  : "${ANDROID_NDK_HOME:?Run --downloads-only first to configure the Android toolchain}"
+  require_command cmake
+  require_command ninja
+  require_command scons
+  require_command java
+  require_command nproc
+  if [[ ! -d "$VCPKG_ROOT/.git" ]]; then
+    git clone https://github.com/microsoft/vcpkg.git "$VCPKG_ROOT"
+  fi
+  git -C "$VCPKG_ROOT" checkout --detach "$VCPKG_BASELINE"
+  if [[ ! -x "$VCPKG_ROOT/vcpkg" ]]; then
+    "$VCPKG_ROOT/bootstrap-vcpkg.sh" -disableMetrics
+  fi
+
+  (cd "$PROJECT_ROOT/addons/nightfall-stream"
+    cmake --preset android -DCMAKE_BUILD_TYPE=Release -DVCPKG_OVERLAY_TRIPLETS="$PROJECT_ROOT/vcpkg-overlay/ci-triplets"
+    cmake --build build/android --parallel "$NIGHTFALL_BUILD_JOBS")
+
+  stream_lib="$PROJECT_ROOT/addons/nightfall-stream/bin/android/libnightfall-stream.android.template_release.arm64.so"
+  [[ -f "$stream_lib" ]] || { echo "Release streaming library was not produced: $stream_lib" >&2; exit 1; }
+}
+if [[ "$STREAM_ONLY" == 1 ]]; then
+  build_stream
+  exit 0
+fi
 
 # Every downloaded artifact is pinned in android-inputs.sha256. Keep URLs here
 # so the clean-runner recipe is reviewable without querying mutable release APIs.
@@ -174,24 +210,6 @@ if [[ "$DOWNLOADS_ONLY" -eq 1 ]]; then
   exit 0
 fi
 
-require_command cmake
-require_command ninja
-require_command scons
-require_command java
-require_command nproc
-if [[ ! -d "$VCPKG_ROOT/.git" ]]; then
-  git clone https://github.com/microsoft/vcpkg.git "$VCPKG_ROOT"
-fi
-git -C "$VCPKG_ROOT" checkout --detach "$VCPKG_BASELINE"
-if [[ ! -x "$VCPKG_ROOT/vcpkg" ]]; then
-  "$VCPKG_ROOT/bootstrap-vcpkg.sh" -disableMetrics
-fi
-
-"$PROJECT_ROOT/tools/build_support/bootstrap_native_xr.sh"
-(cd "$PROJECT_ROOT/addons/nightfall-stream"
-  cmake --preset android -DCMAKE_BUILD_TYPE=Release -DVCPKG_OVERLAY_TRIPLETS="$PROJECT_ROOT/vcpkg-overlay/triplets"
-  cmake --build build/android --parallel "$NIGHTFALL_BUILD_JOBS")
-
-stream_lib="$PROJECT_ROOT/addons/nightfall-stream/bin/android/libnightfall-stream.android.template_release.arm64.so"
-[[ -f "$stream_lib" ]] || { echo "Release streaming library was not produced: $stream_lib" >&2; exit 1; }
+bash "$SCRIPT_DIR/native_xr_cache.sh" ensure
+build_stream
 echo "Android native build inputs are ready."

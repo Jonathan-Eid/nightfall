@@ -15,6 +15,7 @@ API_STAMP="$CACHE_ROOT/godot-cpp-api.version"
 JOBS="${NIGHTFALL_BUILD_JOBS:-$(nproc)}"
 SOURCES_ONLY=0
 ANDROID_RELEASE_ONLY=0
+RELEASE_ONLY=0
 ENGINE_PATCHES=()
 for patch_name in "${NIGHTFALL_ENGINE_PATCH_NAMES[@]}"; do
   ENGINE_PATCHES+=("$PROJECT_ROOT/patches/$patch_name")
@@ -22,7 +23,7 @@ done
 
 usage() {
   cat <<EOF
-Usage: $0 [--sources-only | --android-release-only]
+Usage: $0 [--sources-only | --android-release-only | --release-only]
 
 Recreates Nightfall's patched native-XR toolchain from pinned upstream commits.
 By default it builds the patched editor, OpenXR-aware godot-cpp bindings, and
@@ -32,6 +33,8 @@ both Android runtime libraries. Artifacts are cached under:
 Options:
   --sources-only  Clone and patch the pinned sources without compiling them
   --android-release-only  Rebuild only the patched Android release runtime
+  --release-only  Build the patched editor/API, release godot-cpp bindings,
+                  and patched Android release runtime (skip debug outputs)
   --help          Show this help
 
 Environment overrides:
@@ -44,10 +47,18 @@ for arg in "$@"; do
   case "$arg" in
     --sources-only) SOURCES_ONLY=1 ;;
     --android-release-only) ANDROID_RELEASE_ONLY=1 ;;
+    --release-only) RELEASE_ONLY=1 ;;
     --help|-h) usage; exit 0 ;;
     *) echo "Unknown option: $arg" >&2; usage >&2; exit 2 ;;
   esac
 done
+
+mode_count=$((SOURCES_ONLY + ANDROID_RELEASE_ONLY + RELEASE_ONLY))
+if (( mode_count > 1 )); then
+  echo "--sources-only, --android-release-only, and --release-only are mutually exclusive" >&2
+  usage >&2
+  exit 2
+fi
 
 require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -219,7 +230,15 @@ if [[ ! -f "$ANDROID_NDK_ROOT/build/cmake/android.toolchain.cmake" ]]; then
 fi
 export ANDROID_HOME ANDROID_NDK_ROOT
 
-for target in debug release; do
+if [[ "$RELEASE_ONLY" -eq 1 ]]; then
+  BINDING_TARGETS=(release)
+  RUNTIME_TARGETS=(release)
+else
+  BINDING_TARGETS=(debug release)
+  RUNTIME_TARGETS=(debug release)
+fi
+
+for target in "${BINDING_TARGETS[@]}"; do
   echo "Building godot-cpp Android $target bindings..."
   scons -C "$GODOT_CPP" platform=android target="template_$target" arch=arm64 \
     android_api_level=24 ndk_version="$NIGHTFALL_ANDROID_NDK_VERSION" \
@@ -227,31 +246,20 @@ for target in debug release; do
 done
 
 mkdir -p "$RUNTIME_DIR"
-echo "Building patched Android debug runtime..."
-scons -C "$GODOT_SOURCE" platform=android target=template_debug arch=arm64 -j"$JOBS"
-DEBUG_RUNTIME="$GODOT_SOURCE/platform/android/java/lib/libs/debug/arm64-v8a/libgodot_android.so"
-if [[ ! -f "$DEBUG_RUNTIME" ]]; then
-  DEBUG_RUNTIME="$GODOT_SOURCE/bin/libgodot.android.template_debug.arm64.so"
-fi
-if [[ ! -f "$DEBUG_RUNTIME" ]]; then
-  echo "Godot debug runtime was not produced in a known output location." >&2
-  exit 1
-fi
-cp "$DEBUG_RUNTIME" "$RUNTIME_DIR/android_debug_arm64.so"
-nightfall_runtime_build_stamp "$PROJECT_ROOT" "$RUNTIME_DIR/android_debug_arm64.so" > "$RUNTIME_DIR/android_debug_arm64.so.build-stamp"
-
-echo "Building patched Android release runtime..."
-scons -C "$GODOT_SOURCE" platform=android target=template_release arch=arm64 -j"$JOBS"
-RELEASE_RUNTIME="$GODOT_SOURCE/platform/android/java/lib/libs/release/arm64-v8a/libgodot_android.so"
-if [[ ! -f "$RELEASE_RUNTIME" ]]; then
-  RELEASE_RUNTIME="$GODOT_SOURCE/bin/libgodot.android.template_release.arm64.so"
-fi
-if [[ ! -f "$RELEASE_RUNTIME" ]]; then
-  echo "Godot release runtime was not produced in a known output location." >&2
-  exit 1
-fi
-cp "$RELEASE_RUNTIME" "$RUNTIME_DIR/android_release_arm64.so"
-nightfall_runtime_build_stamp "$PROJECT_ROOT" "$RUNTIME_DIR/android_release_arm64.so" > "$RUNTIME_DIR/android_release_arm64.so.build-stamp"
+for target in "${RUNTIME_TARGETS[@]}"; do
+  echo "Building patched Android $target runtime..."
+  scons -C "$GODOT_SOURCE" platform=android "target=template_$target" arch=arm64 -j"$JOBS"
+  RUNTIME="$GODOT_SOURCE/platform/android/java/lib/libs/$target/arm64-v8a/libgodot_android.so"
+  if [[ ! -f "$RUNTIME" ]]; then
+    RUNTIME="$GODOT_SOURCE/bin/libgodot.android.template_$target.arm64.so"
+  fi
+  if [[ ! -f "$RUNTIME" ]]; then
+    echo "Godot $target runtime was not produced in a known output location." >&2
+    exit 1
+  fi
+  cp "$RUNTIME" "$RUNTIME_DIR/android_${target}_arm64.so"
+  nightfall_runtime_build_stamp "$PROJECT_ROOT" "$RUNTIME_DIR/android_${target}_arm64.so" > "$RUNTIME_DIR/android_${target}_arm64.so.build-stamp"
+done
 
 echo "Native-XR toolchain ready:"
 echo "  Godot source: $GODOT_SOURCE"

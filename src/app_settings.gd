@@ -39,14 +39,25 @@ const DEFAULT_IDLE_TIMEOUT_MIN := 0
 const DEFAULT_PIPEWIRE_RESTORE_TOKEN := ""
 const DEFAULT_USB_LINK_ENABLED := false
 const DEFAULT_HDR_ENABLED := false
+## Multipath: also receive the stream over a second network (NF_MULTIPATH_REMOTE)
+## when Nightfall Meteor offers it.
+const DEFAULT_MULTIPATH_ENABLED := true
 const DEFAULT_MICROPHONE_ENABLED := false
 # Empty means "follow the OS language" (see Localization.resolve_language()).
 const DEFAULT_LANGUAGE := ""
 
+var h264_high_bitrate := false
+var extended_bitrate_limits := false:
+	set(value):
+		extended_bitrate_limits = value
+		VideoEncodingOptions.extended_limits = value
+var grip_scroll_enabled := false
 var screen_crop_mode: int = 0
 var screen_host_background: bool = false
 var screen_key_mode: int = 0
 var screen_key_tolerance: int = 1
+## CRT look on the main screen: 0 off, 1 normal (TV-sized lines), 2 fine (monitor-sized lines).
+var screen_crt_mode: int = 0
 
 var bezel_enabled: bool = DEFAULT_BEZEL_ENABLED
 var passthrough_enabled: bool = DEFAULT_PASSTHROUGH_ENABLED
@@ -55,8 +66,16 @@ var sharpen_mode: int = DEFAULT_SHARPEN_MODE
 var brightness_pct: int = DEFAULT_BRIGHTNESS_PCT
 var contrast_pct: int = DEFAULT_CONTRAST_PCT
 var gamma_pct: int = DEFAULT_GAMMA_PCT
+var ambient_gain: float = 1.0
 var ambient_mode: int = DEFAULT_AMBIENT_MODE
 var ambient_color: int = DEFAULT_AMBIENT_COLOR
+## Screen Res (Settings > Display, Linux only): Auto renders each screen at the
+## sharpness the headset can show (EyeResolution); strength 1-6 sets how far it
+## may go below the stream's resolution. Auto 2 looked identical to Full on a
+## Steam Frame.
+const DEFAULT_EYE_RESOLUTION_STRENGTH := 2
+var eye_resolution_auto: bool = true
+var eye_resolution_strength: int = DEFAULT_EYE_RESOLUTION_STRENGTH
 var browser_resolution: int = DEFAULT_BROWSER_RESOLUTION
 ## Hidden draws no VR pointer on stream screens, for Mouse Follows Pointer,
 ## where the PC's own cursor already shows where you point.
@@ -73,6 +92,14 @@ var passthrough_fade_pct: int = DEFAULT_PASSTHROUGH_FADE_PCT
 var tracking_mode: int = DEFAULT_TRACKING_MODE
 var codec_preference: int = DEFAULT_CODEC_PREFERENCE
 var grid_mode_enabled: bool = DEFAULT_GRID_MODE_ENABLED
+var placement_grid_shape: int = 1
+var placement_grid_spacing: float = 0.1
+## Cylinder/sphere grids: 0 curves like a Slightly Curved screen, 100 bends
+## it tightest (ScreenPlacementController.curve_factor()).
+var placement_grid_curve: int = 0
+## Lock Screens: secondary screens hide their grab bar, shortcuts and corners
+## (and stop catching the pointer there), so only the primary moves the layout.
+var secondary_screens_locked: bool = false
 var performance_overlay_enabled: bool = DEFAULT_PERFORMANCE_OVERLAY_ENABLED
 var ai_3d_gpu_priority: int = DEFAULT_AI_3D_GPU_PRIORITY
 var auto_reconnect_enabled: bool = DEFAULT_AUTO_RECONNECT_ENABLED
@@ -87,6 +114,7 @@ var usb_link_enabled: bool = DEFAULT_USB_LINK_ENABLED
 ## Ask the host for an HDR10 stream (10-bit, PQ) and tone-map it for the
 ## headset, instead of the host squashing its HDR desktop to SDR.
 var hdr_enabled: bool = DEFAULT_HDR_ENABLED
+var multipath_enabled: bool = DEFAULT_MULTIPATH_ENABLED
 ## Send the headset microphone to Nightfall Meteor (MeteorMicrophone).
 var microphone_enabled: bool = DEFAULT_MICROPHONE_ENABLED
 # Not reset with the other general settings: a settings reset should not
@@ -98,6 +126,7 @@ func reset_display() -> void:
 	screen_host_background = false
 	screen_key_mode = 0
 	screen_key_tolerance = 1
+	screen_crt_mode = 0
 	bezel_enabled = DEFAULT_BEZEL_ENABLED
 	passthrough_enabled = DEFAULT_PASSTHROUGH_ENABLED
 	background_mode = DEFAULT_BACKGROUND_MODE
@@ -105,10 +134,12 @@ func reset_display() -> void:
 	brightness_pct = DEFAULT_BRIGHTNESS_PCT
 	contrast_pct = DEFAULT_CONTRAST_PCT
 	gamma_pct = DEFAULT_GAMMA_PCT
+	ambient_gain = 1.0
 	ambient_mode = DEFAULT_AMBIENT_MODE
 	ambient_color = DEFAULT_AMBIENT_COLOR
 
 func reset_general() -> void:
+	grip_scroll_enabled = false
 	browser_resolution = DEFAULT_BROWSER_RESOLUTION
 	cursor_mode = DEFAULT_CURSOR_MODE
 	pointer_steady = DEFAULT_POINTER_STEADY
@@ -117,8 +148,14 @@ func reset_general() -> void:
 	high_refresh_rates = DEFAULT_HIGH_REFRESH_RATES
 	passthrough_fade_pct = DEFAULT_PASSTHROUGH_FADE_PCT
 	tracking_mode = DEFAULT_TRACKING_MODE
+	h264_high_bitrate = false
+	extended_bitrate_limits = false
 	codec_preference = DEFAULT_CODEC_PREFERENCE
 	grid_mode_enabled = DEFAULT_GRID_MODE_ENABLED
+	placement_grid_shape = 1
+	placement_grid_spacing = 0.1
+	placement_grid_curve = 0
+	secondary_screens_locked = false
 	performance_overlay_enabled = DEFAULT_PERFORMANCE_OVERLAY_ENABLED
 	ai_3d_gpu_priority = DEFAULT_AI_3D_GPU_PRIORITY
 	auto_reconnect_enabled = DEFAULT_AUTO_RECONNECT_ENABLED
@@ -130,3 +167,4 @@ func reset_general() -> void:
 	pipewire_restore_token = DEFAULT_PIPEWIRE_RESTORE_TOKEN
 	usb_link_enabled = DEFAULT_USB_LINK_ENABLED
 	hdr_enabled = DEFAULT_HDR_ENABLED
+	multipath_enabled = DEFAULT_MULTIPATH_ENABLED

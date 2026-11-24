@@ -51,18 +51,7 @@ impl Instance {
         let existing = std::fs::read_to_string(&path).unwrap_or_default();
         let mut initial = vec![("sunshine_name", name.to_string()), ("address_family", "both".into())];
         #[cfg(windows)]
-        {
-            initial.push(("system_tray", "false".into()));
-            // Meteor captures the user's connected monitors by default. The
-            // host's Windows 11 default instead creates a virtual display,
-            // which needs driver access a normal desktop process may lack.
-            // An explicit user choice remains untouched by render_config.
-            initial.push(("virtual_display_mode", "disabled".into()));
-            // Preserve the user's desktop resolution. The default "automatic"
-            // resizes the display to match the stream, which breaks 1440p+
-            // desktops when connecting from a 1080p headset.
-            initial.push(("dd_resolution_option", "disabled".into()));
-        }
+        initial.extend(windows_initial_config());
         let text = render_config(&existing, &[("port", self.base.to_string())], &initial);
         if text != existing {
             std::fs::write(&path, text).map_err(fail)?;
@@ -131,7 +120,8 @@ impl Instance {
 /// When count = 0, sets mode to `disabled` and clears the permanent count.
 
 #[cfg(windows)]
-pub fn set_virtual_display_mode(conf_path: &std::path::Path, appdata: &std::path::Path, count: u8) -> Result<(), String> {
+/// Returns whether the file changed: only turning virtual displays on or off does.
+pub fn set_virtual_display_mode(conf_path: &std::path::Path, appdata: &std::path::Path, count: u8) -> Result<bool, String> {
     let fail = |e: std::io::Error| format!("{}: {e}", conf_path.display());
     std::fs::create_dir_all(appdata).map_err(fail)?;
     let existing = std::fs::read_to_string(conf_path).unwrap_or_default();
@@ -144,14 +134,37 @@ pub fn set_virtual_display_mode(conf_path: &std::path::Path, appdata: &std::path
         always.push(("virtual_display_layout", "extended_isolated".into()));
     }
     let text = render_config(&existing, &always, &[]);
-    if text != existing {
-        std::fs::write(conf_path, text).map_err(fail)?;
+    if text == existing {
+        return Ok(false);
     }
-    Ok(())
+    std::fs::write(conf_path, text).map_err(fail)?;
+    Ok(true)
 }
 
 /// `existing` with `always` keys set to their values, and `initial` keys
 /// added when missing. A header explains who wrote it.
+/// First-run Windows settings for the bundled host. An explicit user choice
+/// remains untouched by render_config.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn windows_initial_config() -> Vec<(&'static str, String)> {
+    vec![
+        ("system_tray", "false".into()),
+        // Meteor captures the user's connected monitors by default. The
+        // host's Windows 11 default instead creates a virtual display,
+        // which needs driver access a normal desktop process may lack.
+        ("virtual_display_mode", "disabled".into()),
+        // Leave the user's monitors as they are. The defaults ("automatic")
+        // switch the streamed display to the stream's resolution and frame
+        // rate: a 1440p desktop dropped to 1080p, and a 240 Hz monitor to the
+        // headset's 72 Hz, which it lacks, so Windows chose 60 Hz. Starting
+        // and ending virtual screens re-applies that, and it was not always
+        // undone. Captures don't need it: the encoder takes frames at the
+        // stream's rate from a faster display.
+        ("dd_resolution_option", "disabled".into()),
+        ("dd_refresh_rate_option", "disabled".into()),
+    ]
+}
+
 pub(crate) fn render_config(existing: &str, always: &[(&str, String)], initial: &[(&str, String)]) -> String {
     let key_of = |line: &str| line.split_once('=').map(|(k, _)| k.trim().to_string());
     let mut lines: Vec<String> = Vec::new();
@@ -229,6 +242,18 @@ mod tests {
     }
 
     #[test]
+    fn windows_leaves_the_monitors_resolution_and_refresh_rate_alone() {
+        let text = render_config("port = 47989\n", &[], &windows_initial_config());
+        assert!(text.contains("dd_resolution_option = disabled\n"), "{text}");
+        assert!(text.contains("dd_refresh_rate_option = disabled\n"), "{text}");
+        // An existing install without the key gets it; a user's own choice stays.
+        let existing = "port = 47989\ndd_resolution_option = disabled\n";
+        assert!(render_config(existing, &[], &windows_initial_config()).contains("dd_refresh_rate_option = disabled\n"));
+        let chosen = "port = 47989\ndd_refresh_rate_option = automatic\n";
+        assert!(render_config(chosen, &[], &windows_initial_config()).contains("dd_refresh_rate_option = automatic\n"));
+    }
+
+    #[test]
     fn physical_capture_default_preserves_explicit_virtual_display_choice() {
         let defaults=[("virtual_display_mode", "disabled".into())];
         assert!(render_config("port = 47989\n", &[], &defaults)
@@ -244,23 +269,24 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let conf = dir.join("sunshine.conf");
         // Enable (count=1): writes per_client + count=1 + extended_isolated.
-        set_virtual_display_mode(&conf, &dir, 1).unwrap();
+        assert!(set_virtual_display_mode(&conf, &dir, 1).unwrap());
         let text = std::fs::read_to_string(&conf).unwrap();
         assert!(text.contains("virtual_display_mode = per_client\n"), "{text}");
         assert!(text.contains("dd_virtual_display_permanent_count = 1\n"), "{text}");
         assert!(text.contains("virtual_display_layout = extended_isolated\n"), "{text}");
-        // Enable (count=2): the permanent count stays 1; extra displays are per session.
-        set_virtual_display_mode(&conf, &dir, 2).unwrap();
+        // Enable (count=2): the permanent count stays 1; extra displays are per session,
+        // so the file is unchanged and the host needs no reload.
+        assert!(!set_virtual_display_mode(&conf, &dir, 2).unwrap());
         let text_c2 = std::fs::read_to_string(&conf).unwrap();
         assert!(text_c2.contains("dd_virtual_display_permanent_count = 1\n"), "{text_c2}");
         // Disable (count=0): overwrites mode and count, leaves layout alone.
-        set_virtual_display_mode(&conf, &dir, 0).unwrap();
+        assert!(set_virtual_display_mode(&conf, &dir, 0).unwrap());
         let text2 = std::fs::read_to_string(&conf).unwrap();
         assert!(text2.contains("virtual_display_mode = disabled\n"), "{text2}");
         assert!(text2.contains("dd_virtual_display_permanent_count = 0\n"), "{text2}");
         // Idempotent: no write when nothing changes.
         let mtime = std::fs::metadata(&conf).unwrap().modified().unwrap();
-        set_virtual_display_mode(&conf, &dir, 0).unwrap();
+        assert!(!set_virtual_display_mode(&conf, &dir, 0).unwrap());
         assert_eq!(std::fs::metadata(&conf).unwrap().modified().unwrap(), mtime);
         std::fs::remove_dir_all(&dir).ok();
     }

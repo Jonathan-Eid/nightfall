@@ -96,6 +96,8 @@ struct Negotiation {
     launch_intent: Option<String>,
     foveated_encoding: bool,
     library_available:bool,
+    /// Refuse XR offers: the host serves this connection for the host background only.
+    no_offers: bool,
 }
 impl Negotiation {
     fn reply(&self, reason: Option<&str>) -> Reply {
@@ -148,7 +150,7 @@ impl Negotiation {
             }
             Request::ConfigureVideo { bitrate_mbps, codec, foveated_encoding } => {
                 if self.session.is_some() { return Ok(self.reply(Some("busy"))); }
-                if bitrate_mbps != 0 && !(8..=160).contains(&bitrate_mbps) {
+                if bitrate_mbps != 0 && !(8..=1000).contains(&bitrate_mbps) {
                     return Ok(self.reply(Some("unsupported_bitrate")));
                 }
                 let codec = codec.unwrap_or_else(|| "h264".into());
@@ -157,6 +159,8 @@ impl Negotiation {
                 self.codec = codec;
                 self.foveated_encoding = foveated_encoding && self.encoder.as_ref().is_none_or(|caps|caps.foveated_encoding);
             }
+            // A control-only host (macOS: no XR runtime) serves the host background, not XR.
+            Request::Offer { .. } | Request::OfferLong { .. } if self.no_offers => return Ok(self.reply(Some("xr_unsupported_on_host"))),
             Request::Offer { width, height, hz } | Request::OfferLong { width, height, hz } => {
                 if self.session.is_some() {
                     return Ok(self.reply(Some("busy")));
@@ -311,7 +315,7 @@ async fn connection_mode(
     enable_relay: bool,
     runtime_root: Option<std::path::PathBuf>,
 ) -> io::Result<()> {
-    connection_supervised(stream, key, allowed, session_slot, enable_relay, runtime_root, None, None, None).await
+    connection_supervised(stream, key, allowed, session_slot, enable_relay, runtime_root, None, None, None, true).await
 }
 
 async fn connection_supervised(
@@ -324,6 +328,7 @@ async fn connection_supervised(
     _runtime_tasks: Option<crate::xr_relay::RuntimeTasks>,
     pairing: Option<Arc<crate::xr_trust::Trust>>,
     relay_ports: Option<(u16, u16)>,
+    offers: bool,
 ) -> io::Result<()> {
     let bind = stream.local_addr()?;
     let authenticated = tokio::time::timeout(IO_TIMEOUT, async {
@@ -403,11 +408,19 @@ async fn connection_supervised(
             .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "write timeout"))?;
     };
     log::info!("Paired headset authenticated for XR control");
+    #[cfg(target_os = "linux")]
+    let _runtime_registration = if let Some(root)=runtime_root.as_ref().filter(|_|enable_relay) {
+        let root=root.clone();
+        tokio::task::spawn_blocking(move ||crate::xr_activation::register_authenticated(&root))
+            .await.map_err(io::Error::other)??
+    } else {None};
     let mut watch_logged=false;
     let mut delivered_launch=None;
     #[cfg(windows)]
     let mut startup_claim=crate::xr_windows::StartupClaim::new(runtime_root.as_deref());
-    let mut negotiation = Negotiation::default();
+    #[cfg(target_os = "linux")]
+    let mut startup_claim=crate::xr_activation::StartupClaim::new(runtime_root.as_deref());
+    let mut negotiation = Negotiation { no_offers: !offers, ..Negotiation::default() };
     let mut encoder_monitor=crate::xr_encoder::Monitor::default();
     negotiation.encoder=encoder_monitor.refresh(runtime_root.as_deref()).await;
     negotiation.library_available=enable_relay && runtime_root.as_ref().is_some_and(|root| {
@@ -479,7 +492,7 @@ async fn connection_supervised(
         } else if let Request::ClaimLaunch {generation}=&request {
             if negotiation.session.is_none() && runtime_root.as_ref().filter(|_|enable_relay).is_some_and(|root|crate::xr_launch_intent::claim(root,generation)) {
                 log::info!("Headset claimed XR launch notice");
-                #[cfg(windows)]
+                #[cfg(any(windows,target_os = "linux"))]
                 startup_claim.set(generation);
                 negotiation.launch_intent=Some(generation.clone());
                 negotiation.reply(None)
@@ -561,6 +574,8 @@ pub(crate) struct ServiceConfig {
     pub runtime_root: Option<std::path::PathBuf>,
     pub pairing: Option<Arc<crate::xr_trust::Trust>>,
     pub relay_ports: Option<(u16, u16)>,
+    /// Whether headsets may offer XR sessions; false serves the host background only.
+    pub offers: bool,
 }
 
 /// Serve a caller-owned listener until cancellation. Dropping the cancellation
@@ -598,9 +613,10 @@ pub(crate) async fn serve(
                 let owner=runtime_tasks.clone();
                 let pairing=config.pairing.clone();
                 let relay_ports=config.relay_ports;
+                let offers=config.offers;
                 tasks.spawn(async move {
                     let _permit=permit;
-                    let result=connection_supervised(stream,key,allowed,slot,relay,root,Some(owner),pairing,relay_ports).await;
+                    let result=connection_supervised(stream,key,allowed,slot,relay,root,Some(owner),pairing,relay_ports,offers).await;
                     if let Err(error)=result {
                         eprintln!("Meteor XR control session ended: {error}");
                     }
@@ -685,7 +701,7 @@ pub async fn command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         );
     }
     let (stop, cancel) = watch::channel(false);
-    let service = serve(listener, ServiceConfig { key, allowed, enable_relay, runtime_root, pairing: None, relay_ports }, cancel);
+    let service = serve(listener, ServiceConfig { key, allowed, enable_relay, runtime_root, pairing: None, relay_ports, offers: true }, cancel);
     tokio::pin!(service);
     tokio::select! {
         result=&mut service=>result?,
@@ -794,7 +810,20 @@ mod tests {
             runtime_root: None,
             pairing: None,
             relay_ports: None,
+            offers: true,
         }
+    }
+
+    /// macOS serves the control connection for the host background only.
+    #[test]
+    fn a_control_only_host_refuses_xr_offers() {
+        let mut state = Negotiation { no_offers: true, ..Negotiation::default() };
+        for request in [Request::Offer { width: 1920, height: 1920, hz: 72 }, Request::OfferLong { width: 1920, height: 1920, hz: 72 }] {
+            let reply = state.apply(request).unwrap();
+            assert_eq!(reply.reason.as_deref(), Some("xr_unsupported_on_host"));
+            assert_eq!(reply.state, "idle");
+        }
+        assert_eq!(state.apply(Request::Status {}).unwrap().reason, None, "status still answers, so the headset keeps watching");
     }
 
     #[tokio::test]
@@ -930,7 +959,7 @@ mod tests {
     #[test]
     fn video_bitrate_is_bounded_and_frozen_for_session() {
         let mut state = Negotiation::default();
-        assert_eq!(state.apply(Request::ConfigureVideo {bitrate_mbps: 161, codec: None, foveated_encoding:false}).unwrap().reason.as_deref(), Some("unsupported_bitrate"));
+        assert_eq!(state.apply(Request::ConfigureVideo {bitrate_mbps: 1001, codec: None, foveated_encoding:false}).unwrap().reason.as_deref(), Some("unsupported_bitrate"));
         assert_eq!(state.bitrate_mbps, 0);
         assert!(state.apply(Request::ConfigureVideo {bitrate_mbps: 80, codec: Some("h265".into()), foveated_encoding:false}).unwrap().reason.is_none());
         state.apply(Request::OfferLong {width:1024,height:1024,hz:60}).unwrap();
@@ -1173,6 +1202,44 @@ mod tests {
         assert_eq!(reply(&mut second,&mut rx).await.state,"idle");
         drop(second); stop.send_replace(true);
         task.await.unwrap().unwrap(); std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// What the headset does with a macOS host: authenticate, watch for launches, set the host
+    /// background, and get a refusal for an XR offer, without the connection failing.
+    #[tokio::test]
+    async fn a_control_only_service_serves_the_host_background() {
+        let directory=std::env::temp_dir().join(format!("meteor-control-only-{}-{}",std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let trust=Arc::new(crate::xr_trust::Trust::load(directory.join("trust.json")).unwrap());
+        let mut config=service_config();
+        let pin=config.key.public;
+        config.allowed=[0;32]; config.pairing=Some(trust); config.offers=false;
+        let listener=TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address=listener.local_addr().unwrap();
+        let (stop,cancel)=watch::channel(false);
+        let task=tokio::spawn(serve(listener,config,cancel));
+        let mut stream=TcpStream::connect(address).await.unwrap();
+        let (mut tx,mut rx)=client_handshake(&mut stream,pin,[46;32]).await;
+        assert_eq!(reply(&mut stream,&mut rx).await.state,"idle");
+        let mut ask=async |request: &[u8]| {
+            stream.write_all(&tx.seal(request).unwrap()).await.unwrap();
+            reply(&mut stream,&mut rx).await
+        };
+        // The headset's watch loop gives up on any reason, so these must have none.
+        let watching=ask(br#"{"type":"pending_launch"}"#).await;
+        assert_eq!((watching.state.as_str(),watching.reason.as_deref()),("idle",None));
+        assert!(watching.pending_launch.is_none());
+        // "off" with nothing set changes nothing on this desktop.
+        let background=ask(br#"{"type":"host_background","color":"off"}"#).await;
+        assert_eq!(background.reason,None);
+        assert_eq!(background.library.unwrap(),serde_json::json!({"action":"host_background","error":null,"color":"off"}));
+        let refused=ask(br#"{"type":"host_background","color":"$(reboot)"}"#).await;
+        assert!(refused.library.unwrap()["error"].is_string());
+        let offer=ask(br#"{"type":"offer","width":1920,"height":1920,"hz":72}"#).await;
+        assert_eq!(offer.reason.as_deref(),Some("xr_unsupported_on_host"));
+        assert!(offer.session.is_none());
+        drop(stream); stop.send_replace(true);
+        task.await.unwrap().unwrap(); std::fs::remove_dir_all(directory).ok();
     }
 
     async fn reply(stream: &mut TcpStream, rx: &mut Cipher) -> Reply {

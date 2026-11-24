@@ -53,6 +53,20 @@ var _perf_updates: int = 0
 var _gpu_boost_active: bool = false
 var _gpu_boost_refresh_timer: float = 0.0
 var _native_depth_capture_active: bool = false
+# Asynchronous viewport readback for RenderingDevice renderers (Linux
+# Forward+/Mobile, e.g. the Steam Frame). get_image() on the depth viewport
+# makes the whole renderer wait for the GPU copy (~8 ms at 256, ~17 ms at 384
+# on an Adreno 750), which drops frames on every capture. texture_get_data_async
+# hands the bytes back a few frames later without stalling. Only one request is
+# in flight; the latest-frame policy simply skips captures while it is pending.
+var _async_capture_supported: bool = false
+var _async_capture_checked: bool = false
+var _async_capture_pending: bool = false
+var _async_capture_failed: bool = false
+# A readback that never comes back (its viewport freed, a lost device) must not
+# stop on-device depth for good: give up on it after this long.
+const ASYNC_CAPTURE_TIMEOUT_MSEC := 1000
+var _async_capture_requested_msec: int = 0
 var _direct_stream_source_bound: bool = false
 var _native_renderer_active: bool = false
 # Nightfall Meteor host depth (see settings_controller.meteor_depth_selected()).
@@ -518,7 +532,28 @@ func _push_depth_orientation() -> void:
 		if mat is ShaderMaterial:
 			mat.set_shader_parameter("depth_bottom_first", depth_bottom_first)
 
+var _source_transition_java: Object
+
+func begin_source_transition() -> void:
+	set_enabled(false)
+	if OS.get_name() != "Android": return
+	_source_transition_java = main.settings_controller._android_depth_class()
+	if _source_transition_java: _source_transition_java.beginDepthSourceTransition()
+
+func wait_for_source_transition() -> bool:
+	if _source_transition_java == null: return true
+	var deadline := Time.get_ticks_msec() + 8000
+	while not _source_transition_java.isDepthSourceTransitionIdle():
+		if Time.get_ticks_msec() >= deadline: return false
+		await main.get_tree().process_frame
+	return true
+
+func end_source_transition() -> void:
+	if _source_transition_java: _source_transition_java.endDepthSourceTransition()
+	_source_transition_java = null
+
 func process(delta: float):
+	if main.get("screen_sources") is ScreenSources and (main.screen_sources.switching_tab or main.screen_sources.switching_primary or main.screen_sources.monitor_change_pending()): return
 	_push_depth_orientation()
 	# GPU boost fires whenever depth inference is ACTUALLY running on GPU
 	# (main.stream_backend.get_effective_depth_backend() == 2), not just
@@ -560,7 +595,10 @@ func process(delta: float):
 			upsample_viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
 			offset_viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
 
-	if not _meteor_in_use and main.stream_backend.has_method("submit_depth_frame"):
+	# A failed on-device backend (e.g. "Vulkan model failed to load" on a build
+	# without its models) stays failed for the session: capturing frames for it
+	# cost ~6 ms of GPU time each, ~20 times a second, for no depth at all.
+	if not _meteor_in_use and not backend_failed and main.stream_backend.has_method("submit_depth_frame"):
 		var native_capture_available: bool = (
 			_platform == "Android"
 			and capture_source.has_method("supports_native_depth_capture")
@@ -594,6 +632,12 @@ func process(delta: float):
 			if native_capture_available:
 				_set_native_capture_crop(capture_source)
 				capture_source.request_native_depth_capture(model_input_width, model_input_height)
+			elif _async_depth_capture_available():
+				if _async_capture_pending and Time.get_ticks_msec() - _async_capture_requested_msec > ASYNC_CAPTURE_TIMEOUT_MSEC:
+					main._log("[DEPTH] Async capture got no answer in %d ms; requesting again" % ASYNC_CAPTURE_TIMEOUT_MSEC)
+					_async_capture_pending = false
+				if not _async_capture_pending:
+					_request_async_depth_capture()
 			else:
 				var capture_start = Time.get_ticks_usec()
 				var img = depth_viewport.get_texture().get_image()
@@ -692,6 +736,8 @@ func process(delta: float):
 
 # Runs every frame: connects to Meteor's depth port while Meteor depth is
 # selected and AI 3D is on during a stream, and applies each new map.
+var _meteor_request_at := 0
+
 func _update_meteor() -> void:
 	var wanted: bool = enabled and main.is_streaming and depth_texture != null \
 		and main.settings_controller.meteor_depth_selected()
@@ -704,12 +750,28 @@ func _update_meteor() -> void:
 			main._log("[METEOR] Host depth stopped")
 		_set_meteor_in_use(false)
 		return
-	if not meteor.is_active():
-		var info: Dictionary = main.stream_manager.meteor_depth_info()
-		meteor.start(main.stream_manager.meteor_address(), int(info["port"]), String(info["key"]))
+	var info: Dictionary = main.stream_manager.meteor_depth_info()
+	var region := PackedFloat32Array()
+	if info.get("region_hello", false) and main.primary_screen != null and main.layout != null:
+		var monitor = main.primary_screen.monitor
+		var frame: Vector2i = main.layout.frame_size
+		if monitor != null and frame.x > 0 and frame.y > 0:
+			var rect: Rect2i = monitor.frame_rect
+			region = PackedFloat32Array([float(rect.position.x)/frame.x, float(rect.position.y)/frame.y, float(rect.end.x)/frame.x, float(rect.end.y)/frame.y])
+	if not meteor.is_active() or region != meteor.region:
+		# Never warp a newly selected monitor using the old monitor's map.
+		_meteor_shown_frame = -1
+		_meteor_last_presented = 0
+		var neutral := Image.create(depth_texture.get_width(), depth_texture.get_height(), false, Image.FORMAT_L8)
+		neutral.fill(Color(0.5,0.5,0.5))
+		depth_texture.update(neutral)
+		depth_revision += 1
+		_meteor_request_at = Time.get_ticks_msec()
+		meteor.start(main.stream_manager.meteor_address(), int(info["port"]), String(info["key"]), region)
 		main._log("[METEOR] Connecting to host depth on %s:%d" % [meteor.host, meteor.port])
 	_match_meteor_map()
-	_set_meteor_in_use(meteor.is_delivering())
+	var starting: bool = meteor.is_active() and Time.get_ticks_msec() - _meteor_request_at < int(MeteorDepthReceiver.FIRST_MAP_GRACE_SEC * 1000)
+	_set_meteor_in_use(meteor.is_delivering() or starting)
 
 # Shows the map made from the frame on screen. With Depth Sync, the renderer
 # shows the frame _meteor_sync_delay frames behind the newest decoded one, so
@@ -797,3 +859,71 @@ func _native_capture_supported() -> bool:
 
 func meteor_in_use() -> bool:
 	return _meteor_in_use
+
+
+func _async_depth_capture_available() -> bool:
+	if _async_capture_failed:
+		return false
+	if not _async_capture_checked:
+		_async_capture_checked = true
+		_async_capture_supported = RenderingServer.get_rendering_device() != null \
+			and ClassDB.class_has_method("RenderingDevice", "texture_get_data_async")
+		main._log("[DEPTH] Capture path: %s" % ("RenderingDevice async readback" if _async_capture_supported else "Godot viewport fallback"))
+	return _async_capture_supported
+
+
+func _request_async_depth_capture() -> void:
+	var request_start = Time.get_ticks_usec()
+	var texture_rid: RID = RenderingServer.texture_get_rd_texture(depth_viewport.get_texture().get_rid())
+	if not texture_rid.is_valid():
+		_disable_async_depth_capture("viewport has no RenderingDevice texture")
+		return
+	_async_capture_pending = true
+	_async_capture_requested_msec = Time.get_ticks_msec()
+	var width := model_input_width
+	var height := model_input_height
+	var callback := _on_async_depth_capture_render_thread.bind(width, height)
+	# RenderingDevice calls belong on the render thread; the result comes back
+	# there too and is handed to the main thread with call_deferred.
+	RenderingServer.call_on_render_thread(func():
+		var err: int = RenderingServer.get_rendering_device().texture_get_data_async(texture_rid, 0, callback)
+		if err != OK:
+			_async_depth_capture_request_failed.call_deferred(err))
+	_perf_capture_usec += Time.get_ticks_usec() - request_start
+
+
+func _on_async_depth_capture_render_thread(data: PackedByteArray, width: int, height: int) -> void:
+	_on_async_depth_capture.call_deferred(data, width, height)
+
+
+func _async_depth_capture_request_failed(err: int) -> void:
+	_async_capture_pending = false
+	_disable_async_depth_capture("texture_get_data_async returned %d" % err)
+
+
+func _disable_async_depth_capture(reason: String) -> void:
+	_async_capture_failed = true
+	_async_capture_pending = false
+	main._log("[DEPTH] Async capture unavailable (%s); using the viewport fallback" % reason)
+
+
+func _on_async_depth_capture(data: PackedByteArray, width: int, height: int) -> void:
+	_async_capture_pending = false
+	if _meteor_in_use or main.stream_backend == null:
+		return
+	# A model switch may have resized the viewport while the copy was queued.
+	if width != model_input_width or height != model_input_height:
+		return
+	if data.size() != width * height * 4:
+		_disable_async_depth_capture("unexpected readback size %d for %dx%d" % [data.size(), width, height])
+		return
+	var convert_start = Time.get_ticks_usec()
+	# Same orientation as the get_image() fallback, which flips its readback.
+	var img := Image.create_from_data(width, height, false, Image.FORMAT_RGBA8, data)
+	img.flip_y()
+	var upright := img.get_data()
+	_perf_capture_usec += Time.get_ticks_usec() - convert_start
+	var submit_start = Time.get_ticks_usec()
+	main.stream_backend.submit_depth_frame(upright, width, height)
+	_perf_submit_usec += Time.get_ticks_usec() - submit_start
+	_perf_submitted += 1

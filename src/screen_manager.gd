@@ -102,11 +102,26 @@ func resize_screen_to_aspect(stream_w: int, stream_h: int):
 		main.comp.update_cylinder_params()
 
 func cycle_curvature():
-	main.curvature = (main.curvature + 1) % 3
-	for s in main.screens:
-		s.curvature = main.curvature
-		s.apply_curvature()
-	main.settings_controller.reflow_grid_screens()
+	set_curvature((main.curvature + 1) % 3)
+
+func set_curvature(value: int):
+	if value < 0 or value >= main.curvature_labels.size() or value == main.curvature: return
+	main.curvature = value
+	var grid = main.get("placement_grid")
+	if grid != null and ScreenPlacementGrid.single_surface(grid.shape()):
+		# Cylinder and sphere grids say where screens go; Curve says their
+		# shape (Curved follows the surface, Flat and Slight Curve are panels
+		# in front of it). Every screen keeps its place on the surface.
+		grid.keep_grid(func():
+			for s in main.screens: s.curvature = main.curvature)
+		for s in main.screens:
+			if is_instance_valid(s): s.apply_curvature()
+	else:
+		for s in main.screens:
+			s.curvature = main.curvature
+			s.placement_radius = 0.0
+			s.apply_curvature()
+		main.settings_controller.reflow_grid_screens()
 	# Native video updates its own cylinder every frame, but the separate
 	# ambient OpenXR layer follows the legacy cylinder geometry. Refresh that
 	# geometry even when we must not reactivate the legacy video layers.

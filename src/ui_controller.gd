@@ -4,6 +4,8 @@ const PCVRVideoSettings = preload("res://src/pcvr_stream_settings.gd")
 const PCVRTelemetry = preload("res://src/pcvr_stream_telemetry.gd")
 
 var main: Node3D
+var _virtual_tab_target: VRScreen
+var _creating_virtual_tab := false
 var _tab_display: Control
 var _tab_stream: Control
 var _tab_control: Control
@@ -26,13 +28,18 @@ var _vr_library_open := false
 var _pcvr_tabs: HBoxContainer
 var _pcvr_stream_tab: Button
 var _pcvr_apps_tab: Button
-var _browser_count_btn: Button
+var _grid_spacing_btn: Button
+var _grid_curve_btn: Button
 var _layout_btn: Button
+var _lock_btn: Button
+var _settings_popup: SettingsOptionPopup
+var _ambient_gain_btn: Button
 var _layout_popup: PanelContainer
 var _pcvr_page: VBoxContainer
 var _pcvr_info: Label
 var _pcvr_resolution_btn: Button
 var _pcvr_resolution_range_btn: Button
+var _pcvr_codec_btn: Button
 var _pcvr_bitrate_btn: Button
 var _pcvr_sharpen_btn: Button
 var _pcvr_sampling_btn: Button
@@ -290,6 +297,7 @@ func update_stereo_shader():
 	if main._ui_3d_gpu_api_btn:
 		update_option_btn(main._ui_3d_gpu_api_btn, main.settings_controller.get_ai_3d_gpu_api_label())
 	update_option_btn(main._ui_3d_hz_cap_btn, "%dhz" % main.settings_controller.get_effective_hz_cap())
+	update_eye_resolution_btn_state()
 	# Separation/Convergence are never Auto-overridden (they stay live under
 	# Auto - see update_3d_btn_state()), so no Auto-aware branching needed.
 	update_option_btn(main._ui_3d_separation_btn, main.settings_controller.get_ai_3d_separation_label())
@@ -629,6 +637,8 @@ func _collect_option_buttons(node: Node, result: Array) -> void:
 		_collect_option_buttons(child, result)
 
 func update_ambient_btn_state():
+	if _ambient_gain_btn:
+		update_option_btn(_ambient_gain_btn, "%d%%" % roundi(main.settings.ambient_gain * 100.0))
 	var supported = main.comp != null and main.comp.ambient_supported()
 	update_option_btn(main._ui_ambient_btn, main.ambient_mode_labels[clampi(main.settings.ambient_mode, 0, main.ambient_mode_labels.size() - 1)])
 	update_option_btn(main._ui_ambient_color_btn, main.ambient_color_labels[clampi(main.settings.ambient_color, 0, main.ambient_color_labels.size() - 1)])
@@ -653,28 +663,24 @@ func update_screen_sources() -> void:
 func update_monitor_tab():
 	if not main._ui_apply_preset_btn:
 		return
-	update_option_btn(main._ui_monitors_btn, "%d" % main._staged_physical_count)
-	update_option_btn(main._ui_virtual_monitors_btn, "%d" % main._staged_virtual_count)
-	update_option_btn(_browser_count_btn, "%d" % main.settings_controller.browser_screen_count())
 	update_option_btn(main._ui_grid_mode_btn, "On" if main.settings.grid_mode_enabled else "Off")
+	update_option_btn(_layout_btn, ScreenPlacementGrid.LABELS[main.settings.placement_grid_shape])
+	update_option_btn(_grid_spacing_btn, "%d cm" % roundi(main.settings.placement_grid_spacing * 100))
+	update_option_btn(_grid_curve_btn, "%d%%" % main.settings.placement_grid_curve)
+	# Only the cylinder and sphere surfaces curve.
+	if _grid_curve_btn: _grid_curve_btn.disabled = not main.settings.grid_mode_enabled \
+		or not ScreenPlacementGrid.single_surface(main.settings.placement_grid_shape)
+	update_option_btn(_lock_btn, "On" if main.settings.secondary_screens_locked else "Off")
 	_refresh_preset_row()
 	var selected = main._staged_preset_id != &""
 	var selected_preset = MonitorPresets.find_preset(String(main._staged_preset_id)) if selected else {}
-	# Multi-monitor capture/selection is Polaris-only (see
-	# SettingsController.detect_polaris_host()) - every other host (Sunshine,
-	# etc.) has no manifest to pick real monitors from, so none of this tab's
-	# controls do anything meaningful for it. Grey the whole tab out rather
-	# than let it look interactive and silently no-op (or restart the stream
-	# for a change that can never actually take effect). Revisit once/if
-	# non-Polaris multi-monitor selection is supported.
+	# Host monitor controls require a manifest. Placement controls also work
+	# for standalone browsers and therefore remain available without a host.
 	var polaris = main.settings.host.is_polaris_host
-	var vdd = main.settings.host.virtual_display_installed
-	if _layout_btn: _layout_btn.disabled = not polaris
-	main._ui_monitors_btn.disabled = not polaris
-	main._ui_virtual_monitors_btn.disabled = not polaris or not vdd
+	if _layout_btn: _layout_btn.disabled = false
 	main._ui_apply_preset_btn.disabled = not polaris
 	main._ui_save_preset_btn.disabled = not polaris
-	main._ui_grid_mode_btn.disabled = not polaris
+	main._ui_grid_mode_btn.disabled = false
 	main._ui_remove_preset_btn.disabled = not polaris or not selected or selected_preset.get("built_in", true)
 	for card in _preset_row.get_children():
 		if card is Button:
@@ -716,17 +722,13 @@ func _on_remove_preset_pressed():
 # which is what lets apply_staged_monitor_config() apply a preset's positions
 # directly without needing to reconcile a mismatch at Apply time.
 func _refresh_preset_row():
+	# Legacy cards remain readable for migration, but placement no longer uses them.
 	if not _preset_row:
 		return
 	for c in _preset_row.get_children():
 		_preset_row.remove_child(c)
 		c.queue_free()
-	var total = main.settings_controller.staged_total()
-	for preset in MonitorPresets.all_presets():
-		if preset.get("screen_count", -1) != total:
-			continue
-		var is_selected = preset.get("id", "") == String(main._staged_preset_id)
-		_preset_row.add_child(_build_preset_card(preset, is_selected))
+
 	refresh_ui_buttons()
 
 # Presets have no display name (per spec, identified purely by their layout
@@ -840,7 +842,7 @@ func refresh_pcvr_menu() -> void:
 	if _current_tab == PCVR_PAGE and is_instance_valid(_pcvr_info):
 		var backend = main.pcvr_test.backend
 		var status: Dictionary = backend.get_test_status() if backend else {}
-		_pcvr_info.text = "Resolution: next session • Bitrate / foveation / filters: live" if active else "Ready for XR • Preferences apply to your next session."
+		_pcvr_info.text = "Resolution / Codec: next session • Bitrate / foveation / filters: live" if active else "Ready for XR • Preferences apply to your next session."
 		var xr_control = main.welcome_screen.get_xr_control()
 		if not active and xr_control.state not in ["watching", "prepared"]:
 			_pcvr_info.text = "PCVR setup • Connect and approve this headset in Meteor on your PC."
@@ -864,8 +866,16 @@ func refresh_pcvr_menu() -> void:
 			if active and not foveation_supported:
 				_pcvr_info.text = _pcvr_info.text.replace("Bitrate / foveation / filters: live", "Filters: live • Foveated encoding: unavailable")
 				if encoder_caps.get("live_bitrate", true) == false: _pcvr_info.text += " • Bitrate: next session"
+		if _pcvr_codec_btn:
+			var label := VideoEncodingOptions.label(_resolved_pcvr_codec(_pcvr_video))
+			if active and not _pcvr_codec_matches_session(_pcvr_video): label += " (restart)"
+			update_option_btn(_pcvr_codec_btn, label)
 		if _pcvr_bitrate_btn:
-			update_option_btn(_pcvr_bitrate_btn, "%d Mbps" % _pcvr_video.bitrate_mbps if _pcvr_video.bitrate_mbps else "Auto")
+			var label := "%d Mbps" % _pcvr_video.bitrate_mbps if _pcvr_video.bitrate_mbps else "Auto"
+			if active and not _pcvr_codec_matches_session(_pcvr_video):
+				label += " (restart)"
+				_pcvr_info.text = _pcvr_info.text.replace("Bitrate / foveation / filters: live", "Bitrate: next session • Foveation / filters: live")
+			update_option_btn(_pcvr_bitrate_btn, label)
 		if _pcvr_status:
 			if active:
 				_pcvr_telemetry.sample(status, Time.get_ticks_msec())
@@ -885,11 +895,12 @@ func refresh_pcvr_menu() -> void:
 		if backend and backend.has_method("set_pcvr_post_processing"):
 			backend.set_pcvr_post_processing(_pcvr_video.sharpen, _pcvr_video.sampling)
 
-func _cycle_pcvr_post(sharpen: bool) -> void:
+func _cycle_pcvr_post(sharpen: bool, selected: int = -1) -> void:
 	var pending := PCVRVideoSettings.new(main.get("device_is_quest3") == true)
 	pending.load_from()
-	if sharpen: pending.sharpen = (pending.sharpen + 1) % 3
-	else: pending.sampling = (pending.sampling + 1) % 3
+	if selected < -1 or selected > 2: return
+	if sharpen: pending.sharpen = selected if selected >= 0 else (pending.sharpen + 1) % 3
+	else: pending.sampling = selected if selected >= 0 else (pending.sampling + 1) % 3
 	if pending.save_to() != OK:
 		main._log("[PCVR] Could not save post-processing preferences")
 		return
@@ -905,13 +916,24 @@ static func square_toolbar_button(button: Button) -> void:
 			style.set_corner_radius_all(0)
 			button.add_theme_stylebox_override(state, style)
 
-func _cycle_pcvr_video(resolution: bool) -> void:
+func _cycle_pcvr_video(resolution: bool, selected: int = -1) -> void:
 	var pending := PCVRVideoSettings.new(main.get("device_is_quest3") == true)
 	pending.load_from()
+	if not resolution and pending.codec_choice == -1: pending.codec_choice = _resolved_pcvr_codec(pending)
 	if resolution:
-		pending.cycle_resolution()
+		if selected < 0:
+			pending.cycle_resolution()
+		else:
+			var values: Array = pending.EXTENDED_RESOLUTION_PERCENTAGES if pending.extended_resolution_range else pending.RESOLUTION_PERCENTAGES
+			if selected < values[0] or selected > values[-1] or selected == pending.resolution_percent: return
+			pending.resolution_percent = selected
 	else:
-		pending.cycle_bitrate()
+		if selected < 0:
+			pending.cycle_bitrate()
+		else:
+			if selected != 0 and (selected < 8 or selected > VideoEncodingOptions.maximum_bitrate(pending.effective_codec_choice())): return
+			if selected == pending.bitrate_mbps: return
+			pending.set_bitrate(selected)
 	if pending.save_to() != OK:
 		main._log("[PCVR] Could not save video preferences")
 		return
@@ -919,10 +941,84 @@ func _cycle_pcvr_video(resolution: bool) -> void:
 	if resolution and main.pcvr_handover.state == main.pcvr_handover.State.ACTIVE:
 		var running: Dictionary = main.pcvr_test.backend.get_test_status()
 		main._log("[PCVR] Resolution %d%% saved for next XR session; active %dx%d unchanged" % [pending.resolution_percent, int(running.get("projection_eye_size", 0)), int(running.get("projection_eye_height", running.get("projection_eye_size", 0)))])
-	if not resolution and main.pcvr_handover.state == main.pcvr_handover.State.ACTIVE:
+	if not resolution and main.pcvr_handover.state == main.pcvr_handover.State.ACTIVE and _pcvr_codec_matches_session(pending):
 		if not main.welcome_screen.update_xr_bitrate(pending.bitrate_mbps):
 			main._log("[PCVR] Live bitrate unavailable; preference saved for next session")
 	refresh_pcvr_menu()
+
+func _resolved_pcvr_codec(pending: PCVRVideoSettings) -> int:
+	if pending.codec_choice in VideoEncodingOptions.CHOICES: return pending.codec_choice
+	var preferred: String = main.welcome_screen.get_xr_control().preferred_codec(main.get("device_is_quest3") == true)
+	return VideoEncodingOptions.HEVC if preferred == "h265" else VideoEncodingOptions.H264
+
+func refresh_bitrate_limits() -> void:
+	close_settings_popup()
+	update_option_btn(main._ui_extended_bitrate_btn, "On" if main.settings.extended_bitrate_limits else "Off")
+	var pending := PCVRVideoSettings.new(main.get("device_is_quest3") == true)
+	pending.load_from()
+	pending.save_to()
+	_pcvr_video = pending
+	if main.pcvr_handover.state == main.pcvr_handover.State.ACTIVE and _pcvr_codec_matches_session(pending):
+		main.welcome_screen.update_xr_bitrate(pending.bitrate_mbps)
+	refresh_pcvr_menu()
+	refresh_ui_buttons()
+
+func _pcvr_codec_matches_session(pending: PCVRVideoSettings) -> bool:
+	var status: Dictionary = main.pcvr_test.backend.get_test_status() if main.pcvr_test.backend else {}
+	var running := "h265" if int(status.get("video_codec", 1)) == 2 else "h264"
+	return running == VideoEncodingOptions.wire_name(_resolved_pcvr_codec(pending))
+
+func _set_pcvr_codec(value: int) -> void:
+	var pending := PCVRVideoSettings.new(main.get("device_is_quest3") == true)
+	pending.load_from()
+	var wire := VideoEncodingOptions.wire_name(value)
+	var caps: Dictionary = main.welcome_screen.xr_encoder_capabilities()
+	if wire not in ["h264", "h265"] or wire not in caps.get("codecs", ["h264", "h265"]): return
+	if pending.codec_choice == -1: pending.codec_choice = _resolved_pcvr_codec(pending)
+	if not pending.select_codec(value): return
+	if pending.save_to() != OK: return
+	_pcvr_video = pending
+	if main.pcvr_handover.state == main.pcvr_handover.State.ACTIVE and _pcvr_codec_matches_session(pending):
+		main.welcome_screen.update_xr_bitrate(pending.bitrate_mbps)
+	refresh_pcvr_menu()
+
+func _open_pcvr_choices(setting: StringName) -> void:
+	clear_tooltip()
+	var pending := PCVRVideoSettings.new(main.get("device_is_quest3") == true)
+	pending.load_from()
+	var title := ""
+	var current: int
+	var choices: Array = []
+	var commit := Callable()
+	if setting == &"resolution":
+		var values: Array = pending.EXTENDED_RESOLUTION_PERCENTAGES if pending.extended_resolution_range else pending.RESOLUTION_PERCENTAGES
+		_settings_popup.open_slider("Resolution", pending.resolution_percent if pending.resolution_percent > 0 else 100, values[0], values[-1], 1, "%", Callable(),
+			func(value): _cycle_pcvr_video(true, int(value)), Callable(), "100% (Default)", func(): _cycle_pcvr_video(true, 100))
+		refresh_ui_buttons()
+		return
+	if setting == &"bitrate":
+		_settings_popup.open_slider("Bitrate", pending.bitrate_mbps if pending.bitrate_mbps > 0 else 80, 8, VideoEncodingOptions.maximum_bitrate(_resolved_pcvr_codec(pending)), 1, " Mbps", Callable(),
+			func(value): _cycle_pcvr_video(false, int(value)), Callable(), "Auto", func(): _cycle_pcvr_video(false, 0))
+		refresh_ui_buttons()
+		return
+	match setting:
+		&"codec":
+			title = "Codec"
+			current = _resolved_pcvr_codec(pending)
+			var caps: Dictionary = main.welcome_screen.xr_encoder_capabilities()
+			for value in [VideoEncodingOptions.H264, VideoEncodingOptions.H264_PLUS, VideoEncodingOptions.HEVC]:
+				if VideoEncodingOptions.wire_name(value) in caps.get("codecs", ["h264", "h265"]):
+					choices.append({"id": value, "label": VideoEncodingOptions.label(value)})
+			commit = _set_pcvr_codec
+		&"sharpen", &"sampling":
+			var sharpen := setting == &"sharpen"
+			title = "Sharpen" if sharpen else "Supersampling"
+			current = pending.sharpen if sharpen else pending.sampling
+			for value in 3: choices.append({"id": value, "label": ["Off", "Normal", "Quality"][value]})
+			commit = func(value): _cycle_pcvr_post(sharpen, int(value))
+	if choices.is_empty(): return
+	_settings_popup.open_choices(title, choices, current, commit)
+	refresh_ui_buttons()
 
 func toggle_pcvr_resolution_range() -> void:
 	var pending := PCVRVideoSettings.new(main.get("device_is_quest3") == true)
@@ -961,6 +1057,7 @@ func is_pcvr_page_open() -> bool:
 	return _current_tab == PCVR_PAGE
 
 func open_pcvr_page() -> void:
+	if _settings_popup: _settings_popup.close()
 	_vr_library_open = false
 	if _vr_library: _vr_library.visible = false
 	if _current_tab != PCVR_PAGE:
@@ -1001,6 +1098,7 @@ func close_vr_apps() -> void:
 	refresh_ui_buttons()
 
 func switch_tab(tab: int):
+	if _settings_popup: _settings_popup.close()
 	clear_tooltip()
 	if _layout_popup: _layout_popup.hide()
 	_current_tab = tab
@@ -1148,6 +1246,9 @@ func build_ui():
 	overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	panel.add_child(overlay)
+	_settings_popup = SettingsOptionPopup.new()
+	_settings_popup.name = "SettingsOptionPopup"
+	overlay.add_child(_settings_popup)
 
 	# Reserve the toolbar's place in the VBox, but host the real toolbar as a
 	# later sibling of the VBox. Advanced Settings cannot use normal clipping
@@ -1479,19 +1580,6 @@ func build_ui():
 	mon_row1.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	legacy_monitors.add_child(mon_row1)
 
-	main._ui_monitors_btn = make_option_btn("Monitors", "1")
-	_set_button_tooltip(main._ui_monitors_btn, "Choose how many physical host monitors are displayed.")
-	mon_row1.add_child(main._ui_monitors_btn)
-	main._ui_virtual_monitors_btn = make_option_btn("Virtual", "0")
-	_set_button_tooltip(main._ui_virtual_monitors_btn, "Choose how many virtual monitors are created.")
-	mon_row1.add_child(main._ui_virtual_monitors_btn)
-	_browser_count_btn = make_option_btn("Browsers", "0")
-	_browser_count_btn.name = "BrowserScreenCount"
-	_browser_count_btn.disabled = true
-	_browser_count_btn.modulate.a = 0.3
-	_set_button_tooltip(_browser_count_btn, "Browser screens count towards the layout. Manage them above each screen.")
-	mon_row1.add_child(_browser_count_btn)
-
 	var mon_gap1 = Control.new()
 	mon_gap1.custom_minimum_size = Vector2(0, 20)
 	mon_gap1.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -1506,11 +1594,26 @@ func build_ui():
 	mon_actions_row1.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	legacy_monitors.add_child(mon_actions_row1)
 
-	_layout_btn = make_option_btn("Layout", "Select")
-	_layout_btn.name = "ScreenLayoutPicker"
-	_layout_btn.pressed.connect(func(): _layout_popup.visible = not _layout_popup.visible; refresh_ui_buttons())
-	_set_button_tooltip(_layout_btn, "Choose a layout for all monitor and browser screens.")
-	mon_actions_row1.add_child(_layout_btn)
+	# Screen counts are set from the bars above each screen. Top row: how
+	# screens are arranged. Bottom row: Lock Screen.
+	main._ui_grid_mode_btn = make_option_btn("Grid Mode", "On")
+	_set_button_tooltip(main._ui_grid_mode_btn, "Arrange screens using the monitor grid.")
+	mon_row1.add_child(main._ui_grid_mode_btn)
+	_layout_btn = make_option_btn("Grid Shape", "Cylinder")
+	_layout_btn.name = "ScreenGridShape"
+	_layout_btn.pressed.connect(func(): open_placement_grid_popup(false))
+	_set_button_tooltip(_layout_btn, "Original keeps the classic layout. Cylinder and Sphere lay screens edge to edge on one surface around you.")
+	mon_row1.add_child(_layout_btn)
+	_grid_curve_btn = make_option_btn("Grid Curve", "0%")
+	_grid_curve_btn.name = "ScreenGridCurve"
+	_grid_curve_btn.pressed.connect(open_grid_curve_slider)
+	_set_button_tooltip(_grid_curve_btn, "How tightly the cylinder or sphere wraps around you. 0% curves gently, like a Slightly Curved screen; higher bends the screens in more.")
+	mon_row1.add_child(_grid_curve_btn)
+	_lock_btn = make_option_btn("Lock Screen", "Off")
+	_lock_btn.name = "ScreenLock"
+	_set_button_tooltip(_lock_btn, "Hide the grab bars on secondary screens so they can't be moved by accident. The primary still moves the whole layout.")
+	_lock_btn.pressed.connect(func(): main.settings_controller.toggle_screen_lock())
+	mon_actions_row1.add_child(_lock_btn)
 	main._ui_apply_preset_btn = make_action_btn("Apply")
 	_set_button_tooltip(main._ui_apply_preset_btn, "Apply the selected monitor layout.")
 	mon_actions_row1.add_child(main._ui_apply_preset_btn)
@@ -1520,10 +1623,10 @@ func build_ui():
 	main._ui_remove_preset_btn = make_action_btn("Remove")
 	_set_button_tooltip(main._ui_remove_preset_btn, "Delete the selected custom preset.")
 	mon_actions_row1.add_child(main._ui_remove_preset_btn)
-	main._ui_grid_mode_btn = make_option_btn("Grid Mode", "On")
-	_set_button_tooltip(main._ui_grid_mode_btn, "Arrange screens using the monitor grid.")
-	mon_row1.add_child(main._ui_grid_mode_btn)
 	for button in [main._ui_apply_preset_btn, main._ui_save_preset_btn, main._ui_remove_preset_btn]:
+		# Hidden: the bars above each screen apply counts directly. Kept for
+		# the planned named presets.
+		button.hide()
 		button.custom_minimum_size = Vector2(250, 132)
 		button.add_theme_font_size_override("font_size", 26)
 		button.add_theme_stylebox_override("normal", main._btn_style)
@@ -1611,24 +1714,28 @@ func build_ui():
 	video_row.alignment = BoxContainer.ALIGNMENT_CENTER
 	_pcvr_page.add_child(video_row)
 	_pcvr_resolution_btn = make_option_btn("Resolution", "Host profile")
-	_pcvr_resolution_btn.pressed.connect(func(): _cycle_pcvr_video(true))
+	_pcvr_resolution_btn.pressed.connect(_open_pcvr_choices.bind(&"resolution"))
 	_set_button_tooltip(_pcvr_resolution_btn, "100% uses the native panel resolution on Quest 2/3/3S; other headsets use OpenXR's recommendation. 75–135% in 5% steps; Advanced Settings offers 50–150% in 10% steps. Rounded up to 16 pixels for encoding. Applies next XR session; actual dimensions appear in status.")
 	video_row.add_child(_pcvr_resolution_btn)
 	_pcvr_bitrate_btn = make_option_btn("Bitrate", "Auto")
-	_pcvr_bitrate_btn.pressed.connect(func(): _cycle_pcvr_video(false))
+	_pcvr_bitrate_btn.pressed.connect(_open_pcvr_choices.bind(&"bitrate"))
 	_set_button_tooltip(_pcvr_bitrate_btn, "PCVR video target bitrate. Updates live during XR; status confirms when applied. Auto uses the current session resolution's default.")
 	video_row.add_child(_pcvr_bitrate_btn)
+	_pcvr_codec_btn = make_option_btn("Codec", "HEVC")
+	_pcvr_codec_btn.pressed.connect(_open_pcvr_choices.bind(&"codec"))
+	_set_button_tooltip(_pcvr_codec_btn, "XR codec; independent of desktop. Applies next session.")
+	video_row.add_child(_pcvr_codec_btn)
 	var post_row := HBoxContainer.new()
 	post_row.add_theme_constant_override("separation", 12)
 	post_row.alignment = BoxContainer.ALIGNMENT_CENTER
 	_pcvr_page.add_child(post_row)
 	_pcvr_sharpen_btn = make_option_btn("Sharpen", "Off")
 	_set_button_tooltip(_pcvr_sharpen_btn, "Live OpenXR compositor sharpening, as used by WiVRn. Not an AI upscaler; may add halos. Requires runtime support.")
-	_pcvr_sharpen_btn.pressed.connect(func(): _cycle_pcvr_post(true))
+	_pcvr_sharpen_btn.pressed.connect(_open_pcvr_choices.bind(&"sharpen"))
 	post_row.add_child(_pcvr_sharpen_btn)
 	_pcvr_sampling_btn = make_option_btn("Supersampling", "Off")
 	_set_button_tooltip(_pcvr_sampling_btn, "Live compositor anti-aliasing, as used by WiVRn and ALVR. Reduces edge shimmer when downsampling high-resolution video. Does not increase game resolution or recover missing detail; the runtime may ignore this hint.")
-	_pcvr_sampling_btn.pressed.connect(func(): _cycle_pcvr_post(false))
+	_pcvr_sampling_btn.pressed.connect(_open_pcvr_choices.bind(&"sampling"))
 	post_row.add_child(_pcvr_sampling_btn)
 	_pcvr_foveation_btn = make_option_btn("Foveated Encode", "Off")
 	_set_button_tooltip(_pcvr_foveation_btn, "Fixed-centre NVENC encoding: preserves centre quality and compresses the edges more. Not eye-tracked. Keeps the same render/decoder resolution; does not reduce game rendering cost. Applies live during XR streaming. Default Off.")
@@ -1726,24 +1833,22 @@ func build_ui():
 	main._ui_disconnect_btn.visible = main.is_streaming
 	update_stats_btn_state()
 	update_language_btn()
-	main._ui_3d_mode_btn.button_down.connect(func(): on_ai_3d_mode_toggled())
-	main._ui_3d_type_btn.button_down.connect(func(): on_ai_3d_type_toggled())
-	main._ui_3d_btn.button_down.connect(func(): on_ai_3d_toggled())
+	main._ui_3d_mode_btn.pressed.connect(open_setting_choices.bind(&"mode"))
+	main._ui_3d_type_btn.pressed.connect(open_setting_choices.bind(&"type"))
+	main._ui_3d_btn.pressed.connect(open_setting_choices.bind(&"model"))
 	if main._ui_3d_gpu_api_btn:
-		main._ui_3d_gpu_api_btn.button_down.connect(func(): on_ai_3d_gpu_api_toggled())
+		main._ui_3d_gpu_api_btn.pressed.connect(open_setting_choices.bind(&"backend"))
 	main._ui_3d_enable_btn.button_down.connect(func(): on_ai_3d_speed_toggled())
-	main._ui_3d_hz_cap_btn.button_down.connect(func(): on_ai_3d_hz_cap_toggled())
-	main._ui_3d_separation_btn.button_down.connect(func(): on_ai_3d_separation_toggled())
-	main._ui_3d_convergence_btn.button_down.connect(func(): on_ai_3d_convergence_toggled())
+	main._ui_3d_hz_cap_btn.pressed.connect(open_setting_choices.bind(&"hz_cap"))
+	main._ui_3d_separation_btn.pressed.connect(open_setting_choices.bind(&"separation"))
+	main._ui_3d_convergence_btn.pressed.connect(open_setting_choices.bind(&"convergence"))
 	if main._ui_3d_depth_view_btn:
 		main._ui_3d_depth_view_btn.button_down.connect(func(): on_ai_3d_depth_view_toggled())
 	if main._ui_3d_debug_btn and OS.get_name() == "Android":
-		main._ui_3d_debug_btn.button_down.connect(func(): on_ai_3d_debug_toggled())
+		main._ui_3d_debug_btn.pressed.connect(open_setting_choices.bind(&"depth_debug"))
 	if main._ui_3d_process_debug_btn:
-		main._ui_3d_process_debug_btn.button_down.connect(func(): on_ai_3d_process_debug_toggled())
-	main._ui_3d_priority_btn.button_down.connect(func(): on_ai_3d_priority_toggled())
-	main._ui_monitors_btn.button_down.connect(func(): _cycle_monitors_btn())
-	main._ui_virtual_monitors_btn.button_down.connect(func(): _cycle_virtual_btn())
+		main._ui_3d_process_debug_btn.pressed.connect(open_setting_choices.bind(&"process_debug"))
+	main._ui_3d_priority_btn.pressed.connect(open_setting_choices.bind(&"priority"))
 	main._ui_apply_preset_btn.button_down.connect(func(): _on_apply_preset_pressed())
 	main._ui_save_preset_btn.button_down.connect(func(): _on_save_preset_pressed())
 	main._ui_remove_preset_btn.button_down.connect(func(): _on_remove_preset_pressed())
@@ -1865,11 +1970,15 @@ func _build_menu_tab(
 		for option in row_schema["options"]:
 			var field: StringName = option["field"]
 			var value: String = value_overrides.get(field, option["value"])
+			if field == &"_ui_grip_scroll_btn": value = "On" if main.settings.grip_scroll_enabled else "Off"
+			if field == &"_ui_extended_bitrate_btn": value = "On" if main.settings.extended_bitrate_limits else "Off"
 			var button := make_option_btn(option["label"], value)
 			_set_button_tooltip(button, option["tooltip"])
 			button.visible = option["visible"]
 			button.disabled = option["disabled"]
-			main.set(field, button)
+			if field == &"_ui_grid_spacing_btn": value = "%d cm" % roundi(main.settings.placement_grid_spacing * 100)
+			if field not in [&"_ui_ambient_gain_btn", &"_ui_grid_spacing_btn"]:
+				main.set(field, button)
 			row.add_child(button)
 			if scrollable:
 				_make_scroll_friendly(button)
@@ -1997,6 +2106,30 @@ func _on_scroll_friendly_pressed(callable: Callable) -> void:
 	callable.call()
 
 func _connect_menu_action(button: Button, option: Dictionary, on_release: bool = false) -> void:
+	var choice: StringName = option.get("choice", &"")
+	if choice != &"":
+		var open := open_setting_choices.bind(choice)
+		button.pressed.connect(_on_scroll_friendly_pressed.bind(open) if on_release else open)
+		return
+	var popup_actions := {&"_ui_res_btn": &"resolution", &"_ui_codec_btn": &"codec"}
+	if popup_actions.has(option["field"]):
+		button.pressed.connect(open_setting_choices.bind(popup_actions[option["field"]]))
+		return
+	if option["field"] == &"_ui_fps_btn":
+		button.pressed.connect(open_fps_popup)
+		return
+	if option["field"] == &"_ui_bitrate_btn":
+		button.pressed.connect(open_bitrate_popup)
+		return
+	if option["field"] == &"_ui_grid_spacing_btn":
+		_grid_spacing_btn = button
+		button.name = "ScreenGridSpacing"
+		button.pressed.connect(_on_scroll_friendly_pressed.bind(open_grid_spacing_popup) if on_release else open_grid_spacing_popup)
+		return
+	if option["field"] == &"_ui_ambient_gain_btn":
+		_ambient_gain_btn = button
+		button.pressed.connect(open_ambient_gain_popup)
+		return
 	var target := _menu_action_target(option["target"])
 	var action: StringName = option["action"]
 	if target == null or not target.has_method(action):
@@ -2018,6 +2151,287 @@ func _menu_action_target(target: StringName) -> Object:
 		MenuSchema.TARGET_CONTROLLER:
 			return main.controller_mapper
 	return null
+
+func close_settings_popup() -> void:
+	if _settings_popup: _settings_popup.close()
+
+func open_virtual_screen_popup(target: VRScreen = null) -> void:
+	if target != null:
+		if not main.screen_sources.can_add_monitor_tab(target, true): return
+	elif not main.screen_sources.can_add_monitor_screen(true): return
+	_virtual_tab_target = target
+	_creating_virtual_tab = target != null
+	if not main.ui_visible: main._toggle_ui()
+	var supported: bool = main.layout.virtual_modes_supported
+	var choices: Array = [{"id": Vector2i.ZERO, "label": "Match host monitor"}]
+	for size in [Vector2i(1920,1080), Vector2i(2560,1440), Vector2i(3840,2160), Vector2i(2560,1080), Vector2i(1920,1440)]:
+		choices.append({"id": size, "label": "%d × %d" % [size.x,size.y], "enabled": supported})
+	choices.append({"id": "custom", "label": "Custom resolution", "enabled": supported})
+	_settings_popup.open_choices("New virtual screen", choices, null, func(value):
+		if value is String: _open_virtual_width.call_deferred()
+		else: _create_virtual_screen(value))
+
+func _open_virtual_width() -> void:
+	_settings_popup.open_slider("Virtual screen width", 2560, 320, 8192, 2, " px", Callable(),
+		func(value): _open_virtual_height.call_deferred(int(value)), Callable(), "", Callable())
+
+func _open_virtual_height(width: int) -> void:
+	_settings_popup.open_slider("Virtual screen height", 1440, 240, 8192, 2, " px", Callable(),
+		func(value): _confirm_virtual_size.call_deferred(Vector2i(width,int(value))), Callable(), "", Callable())
+
+func _confirm_virtual_size(size: Vector2i) -> void:
+	var valid := ScreenSources.valid_virtual_size(size)
+	_settings_popup.open_choices("New virtual screen: %d × %d" % [size.x,size.y],
+		[{"id": size, "label": "Create screen" if valid else "Exceeds capture limit", "enabled": valid}], null, _create_virtual_screen)
+
+func _create_virtual_screen(size: Vector2i) -> void:
+	var created: bool
+	if _creating_virtual_tab:
+		created = is_instance_valid(_virtual_tab_target) and await main.screen_sources.add_monitor_tab(_virtual_tab_target, true, size)
+	else:
+		created = await main.screen_sources.add_monitor_screen(true, size)
+	if not created:
+		set_status("Virtual screen could not be created; check host support and screen limits")
+	if _layout_popup: _layout_popup.hide()
+
+func settings_popup_open() -> bool:
+	return _settings_popup != null and _settings_popup.is_visible_in_tree()
+
+func _open_value_slider(setting: StringName) -> void:
+	clear_tooltip()
+	var c = main.settings_controller
+	var host = main.settings.host
+	var primary = main.primary_screen
+	# title, store, property, minimum, maximum, suffix, setter, default
+	var specs := {
+		&"pt_fade": ["PT Fade", main.settings, "passthrough_fade_pct", 0, 100, "%", c.set_passthrough_fade, 0],
+		&"volume": ["Volume", main.settings, "audio_boost_db", 0, 24, " dB", c.set_audio_boost, 0],
+		&"separation": ["Separation", host, "ai_3d_separation_pct", 50, 100, "%", c.set_ai_3d_separation, 75],
+		&"convergence": ["Convergence", host, "ai_3d_convergence_pct", 30, 70, "%", c.set_ai_3d_convergence, 50],
+		&"brightness": ["Brightness", main.settings, "brightness_pct", -20, 20, "%", c.set_brightness, 0],
+		&"contrast": ["Contrast", main.settings, "contrast_pct", 50, 150, "%", c.set_contrast, 100],
+		&"gamma": ["Gamma", main.settings, "gamma_pct", 50, 150, "%", c.set_gamma, 100],
+	}
+	var spec: Array = specs[setting]
+	var apply := func(value):
+		if main.settings.host == host and main.primary_screen == primary: spec[6].call(int(value))
+	# These all apply as the slider moves; closing without Done puts the value back.
+	var start := int(spec[1].get(spec[2]))
+	_settings_popup.open_slider(spec[0], start, spec[3], spec[4], 1, spec[5],
+		apply, apply, func(): apply.call(start), "Default", func(): apply.call(spec[7]), setting in [&"brightness", &"volume"])
+	refresh_ui_buttons()
+
+## Ordinary descriptors share one builder; controllers retain their side effects.
+func _ordinary_choice(setting: StringName) -> Dictionary:
+	var controller = main.settings_controller
+	var spec: Array = []
+	match setting:
+		&"background": spec = ["Background", main.settings, "background_mode", range(main.background_labels.size()), main.background_labels, controller.set_background]
+		&"cursor": spec = ["Cursor Type", main.settings, "cursor_mode", range(main.cursor_labels.size()), main.cursor_labels, controller.set_cursor_mode]
+		&"steady": spec = ["Cursor Steady", main.settings, "pointer_steady", range(main.pointer_steady_labels.size()), main.pointer_steady_labels, controller.set_steady]
+		&"double_click": spec = ["Double Click", main.settings, "double_click_mode", range(main.double_click_mode_labels.size()), main.double_click_mode_labels, controller.set_double_click_mode]
+		&"ambient": spec = ["Ambient", main.settings, "ambient_mode", range(main.ambient_mode_labels.size()), main.ambient_mode_labels, controller.set_ambient_mode]
+		&"ambient_colour": spec = ["Colour", main.settings, "ambient_color", range(main.ambient_color_labels.size()), main.ambient_color_labels, controller.set_ambient_color]
+		&"brightness": spec = ["Brightness", main.settings, "brightness_pct", controller.PICTURE_BRIGHTNESS_VALUES, [], controller.set_brightness]
+		&"contrast": spec = ["Contrast", main.settings, "contrast_pct", controller.PICTURE_CONTRAST_VALUES, [], controller.set_contrast]
+		&"gamma": spec = ["Gamma", main.settings, "gamma_pct", controller.PICTURE_GAMMA_VALUES, [], controller.set_gamma]
+		&"sharpen": spec = ["Sharpen", main.settings, "sharpen_mode", controller.get_sharpen_choices(), [], controller.set_sharpen_mode]
+		&"volume": spec = ["Volume", main.settings, "audio_boost_db", SettingsPersistence.AUDIO_BOOST_VALUES, [], controller.set_audio_boost]
+		&"audio_output": spec = ["Audio Output", main.settings, "android_audio_output", [0, 1], ["Native", "AudioTrack"], controller.set_audio_output]
+		&"idle": spec = ["Idle Disconnect", main.settings, "idle_timeout_min", controller.idle_values, controller.idle_labels, controller.set_idle_timeout]
+		&"pt_fade": spec = ["PT Fade", main.settings, "passthrough_fade_pct", PassthroughFade.FADE_VALUES, [], controller.set_passthrough_fade]
+		&"curve": spec = ["Curve", main, "curvature", range(main.curvature_labels.size()), main.curvature_labels, main.screen_manager.set_curvature]
+		&"device_mode": spec = ["Device Mode", main.controller_mapper, "ctrl_type", range(main.controller_mapper.type_labels.size()), main.controller_mapper.type_labels, main.controller_mapper.set_type]
+		&"alternate": spec = ["Alternate Mode", main.controller_mapper, "btn_toggle", range(main.controller_mapper.btn_toggle_labels.size()), main.controller_mapper.btn_toggle_labels, main.controller_mapper.set_btn_toggle]
+		&"primary": spec = ["Primary Hand", main.controller_mapper, "primary_hand", range(main.controller_mapper.primary_labels.size()), main.controller_mapper.primary_labels, main.controller_mapper.set_primary_hand]
+		&"crop": spec = ["Crop", main.screen_image_options, "selected_crop_mode", range(ScreenImageOptions.CROP_LABELS.size()), ScreenImageOptions.CROP_LABELS, main.screen_image_options.set_crop]
+		&"key": spec = ["Colour Key", main.settings, "screen_key_mode", range(ScreenImageOptions.KEY_LABELS.size()), ScreenImageOptions.KEY_LABELS, main.screen_image_options.set_key]
+		&"crt": spec = ["CRT Filter", main.settings, "screen_crt_mode", range(ScreenImageOptions.CRT_LABELS.size()), ScreenImageOptions.CRT_LABELS, main.screen_image_options.set_crt]
+		&"key_tolerance": spec = ["Key Tolerance", main.settings, "screen_key_tolerance", range(ScreenImageOptions.TOLERANCE_LABELS.size()), ScreenImageOptions.TOLERANCE_LABELS, main.screen_image_options.set_key_tolerance]
+	if spec.is_empty(): return {}
+	var values: Array = spec[3]
+	var labels: Array = spec[4]
+	var choices: Array = []
+	for index in values.size():
+		var value: int = values[index]
+		var label: String = String(labels[index]) if not labels.is_empty() else "%d%%" % value
+		match setting:
+			&"brightness": label = "%+d%%" % value
+			&"volume": label = "Normal" if value == 0 else "+%d dB" % value
+			&"sharpen": label = controller.get_sharpen_label(value)
+			&"pt_fade": label = PassthroughFade.label(value)
+		choices.append({"id": value, "label": label})
+	return {"title": spec[0], "current": spec[1].get(spec[2]), "choices": choices, "setter": spec[5]}
+
+## Build choices from the same runtime capability lists used by cycling.
+func open_setting_choices(setting: StringName) -> void:
+	if setting in [&"pt_fade", &"volume", &"separation", &"convergence", &"brightness", &"contrast", &"gamma"]:
+		_open_value_slider(setting)
+		return
+	clear_tooltip()
+	if _layout_popup: _layout_popup.hide()
+	var controller = main.settings_controller
+	var host = main.settings.host
+	var primary = main.primary_screen
+	var title := ""
+	var current: Variant
+	var choices: Array = []
+	var setter := Callable()
+	match setting:
+		&"depth_debug", &"process_debug":
+			var depth_debug := setting == &"depth_debug"
+			title = "3D Debug" if depth_debug else "3D Process"
+			current = host.ai_3d_debug if depth_debug else host.ai_3d_process_debug
+			var labels: Array = controller.ai_3d_debug_labels if depth_debug else controller.ai_3d_process_debug_labels
+			for value in labels.size(): choices.append({"id": value, "label": labels[value]})
+			setter = controller.set_ai_3d_debug if depth_debug else controller.set_ai_3d_process_debug
+		&"sbs":
+			title = "SBS"
+			current = host.sbs_mode
+			for value in controller.sbs_labels.size():
+				choices.append({"id": value, "label": controller.sbs_labels[value]})
+			setter = func(value):
+				if int(value) != host.sbs_mode: controller.set_sbs_mode(int(value))
+		&"tracking":
+			title = "Tracking"
+			current = main.effective_tracking_mode()
+			for value in [0, 3, 1]:
+				choices.append({"id": value, "label": main.tracking_labels[value]})
+			setter = controller.set_tracking_mode
+		&"cursor_position":
+			title = "Cursor Position"
+			current = host.ai_3d_cursor_position
+			for value in [-1, 0, 1]:
+				choices.append({"id": value, "label": controller.AI3D_CURSOR_POSITION_LABELS[value + 1]})
+			setter = controller.set_ai_3d_cursor_position
+		&"language":
+			title = "Language"
+			current = Localization.resolve_language(main.settings.language)
+			for language in Localization.LANGUAGES:
+				choices.append({"id": language.code, "label": language.name})
+			setter = controller.set_language
+		&"resolution":
+			title = "Default Res"
+			current = host.resolution_idx if host.default_resolution_selected or not host.is_polaris_host else main.resolutions.find(main.compute_requested_resolution(false))
+			for index in main.resolutions.size():
+				var dimensions: Vector2i = main.resolutions[index]
+				choices.append({"id": index, "label": "%d × %d" % [dimensions.x, dimensions.y]})
+			setter = controller.set_default_resolution
+		&"codec":
+			title = "Codec"
+			current = controller.desktop_codec_choice()
+			for value in VideoEncodingOptions.CHOICES:
+				if controller.is_codec_available(VideoEncodingOptions.wire_index(value)):
+					choices.append({"id": value, "label": VideoEncodingOptions.label(value)})
+			setter = controller.set_desktop_codec_choice
+		&"mode":
+			title = "3D Mode"
+			current = host.ai_3d_speed
+			for value in range(1, controller.ai_3d_speed_labels.size()):
+				choices.append({"id": value, "label": controller.ai_3d_speed_labels[value]})
+			setter = controller.set_ai_3d_mode
+		&"type":
+			title = "Type"
+			current = host.ai_3d_backend_pref
+			choices = [{"id": controller.AI3D_BACKEND_GPU, "label": "GPU"}, {"id": controller.AI3D_BACKEND_CPU, "label": "CPU"}]
+			setter = controller.set_ai_3d_type
+		&"model":
+			title = "Quality"
+			current = controller.MODEL_METEOR if controller.meteor_depth_selected() else controller.selected_depth_model_index()
+			for value in controller.get_ai_3d_model_choices():
+				choices.append({"id": value, "label": "Meteor" if value == controller.MODEL_METEOR else controller.ai_3d_models[value].label})
+			setter = controller.set_ai_3d_model
+		&"backend":
+			title = "Backend"
+			current = 2 if controller.get_depth_backend_index() == controller.AI3D_BACKEND_CPU else controller.get_ai_3d_gpu_api_effective()
+			choices = [{"id": 0, "label": "OpenCL"}, {"id": 1, "label": "OpenGL"}, {"id": 2, "label": "CPU"}]
+			setter = controller.set_ai_3d_gpu_api
+		&"hz_cap":
+			title = "Hz Cap"
+			current = host.ai_3d_hz_cap
+			for value in controller.AI3D_HZ_CAP_VALUES:
+				choices.append({"id": value, "label": "%d Hz" % value})
+			setter = controller.set_ai_3d_hz_cap
+		&"separation", &"convergence":
+			var separation := setting == &"separation"
+			title = "Separation" if separation else "Convergence"
+			current = host.ai_3d_separation_pct if separation else host.ai_3d_convergence_pct
+			var values: Array = controller.AI3D_SEPARATION_VALUES if separation else controller.AI3D_CONVERGENCE_VALUES
+			for value in values:
+				choices.append({"id": value, "label": "%d%%%s" % [value, " (Default)" if value == (75 if separation else 50) else ""]})
+			setter = controller.set_ai_3d_separation if separation else controller.set_ai_3d_convergence
+		&"priority":
+			title = "GPU Priority"
+			current = main.settings.ai_3d_gpu_priority
+			for value in controller.ai_3d_gpu_priority_labels.size():
+				choices.append({"id": value, "label": controller.ai_3d_gpu_priority_labels[value]})
+			setter = controller.set_ai_3d_gpu_priority
+	if choices.is_empty():
+		var ordinary := _ordinary_choice(setting)
+		if not ordinary.is_empty():
+			title = ordinary.title
+			current = ordinary.current
+			choices = ordinary.choices
+			setter = ordinary.setter
+	if choices.is_empty() or not setter.is_valid(): return
+	_settings_popup.open_choices(title, choices, current, func(value):
+		# Ignore selections made against a different host/primary screen.
+		if main.settings.host != host or main.primary_screen != primary: return
+		if setting in [&"sbs", &"mode", &"type", &"model", &"backend", &"hz_cap", &"separation", &"convergence"]:
+			main.auto_detect_enabled = false
+		setter.call(value), "H.264 / H.264+: the combined monitor stream is limited to 4032 pixels in width or height. Use HEVC or AV1 (where supported) for more or higher-resolution monitors. Headset and host limits still apply." if setting == &"codec" else "")
+	refresh_ui_buttons()
+
+func open_fps_popup() -> void:
+	clear_tooltip()
+	if _layout_popup: _layout_popup.hide()
+	var host = main.settings.host
+	var choices: Array = []
+	for rate in main.settings_controller.STREAM_FPS_RATES:
+		if rate < main.settings_controller.HIGH_REFRESH_MIN or main.settings.high_refresh_rates:
+			choices.append({"id": rate, "label": "%d Hz" % rate})
+	_settings_popup.open_choices("FPS", choices, host.stream_fps, func(value):
+		if main.settings.host == host: main.settings_controller.set_stream_fps(int(value)))
+	refresh_ui_buttons()
+
+func open_bitrate_popup() -> void:
+	clear_tooltip()
+	if _layout_popup: _layout_popup.hide()
+	var host = main.settings.host
+	var value: int = host.bitrate_mbps
+	if value == 0:
+		value = int(main.bitrates[host.bitrate_idx]) if host.bitrate_idx >= 0 else 40
+	_settings_popup.open_slider("Bitrate", value, HostSettings.MIN_MANUAL_BITRATE_MBPS, VideoEncodingOptions.maximum_bitrate(main.settings_controller.desktop_codec_choice()), 1, " Mbps", Callable(),
+		func(selected):
+			if main.settings.host == host:
+				main.settings_controller.set_bitrate_mbps(int(selected)),
+		Callable(), "Auto", func():
+			if main.settings.host == host:
+				main.settings_controller.set_bitrate_mbps(0))
+
+	refresh_ui_buttons()
+
+func open_ambient_gain_popup() -> void:
+	clear_tooltip()
+	if _layout_popup: _layout_popup.hide()
+	var original: float = main.settings.ambient_gain
+	_settings_popup.open_slider("Ambient Intensity", original * 100.0, 0, 200, 5, "%",
+		func(value):
+			main.settings.ambient_gain = value / 100.0
+			main.comp.apply_ambient_settings(),
+		func(_value):
+			main.state_manager.save_state()
+			update_option_btn(_ambient_gain_btn, "%d%%" % roundi(main.settings.ambient_gain * 100.0)),
+		func():
+			main.settings.ambient_gain = original
+			main.comp.apply_ambient_settings(),
+		"100% (Default)", func():
+			main.settings.ambient_gain = 1.0
+			main.comp.apply_ambient_settings()
+			main.state_manager.save_state()
+			update_option_btn(_ambient_gain_btn, "100%"))
+
+	refresh_ui_buttons()
 
 func make_option_btn(label_text: String, value_text: String) -> Button:
 	var btn = Button.new()
@@ -2125,7 +2539,7 @@ func update_option_btn(btn: Button, value: String):
 	_compose_option_text(btn)
 
 func update_codec_btn():
-	main.ui_controller.update_option_btn(main._ui_codec_btn, main.codec_labels[main.settings.codec_preference])
+	main.ui_controller.update_option_btn(main._ui_codec_btn, VideoEncodingOptions.label(main.settings_controller.desktop_codec_choice()) if main.settings.codec_preference in [0, 1, 2] else main.codec_labels[main.settings.codec_preference])
 
 func update_ctrl_mode_btn():
 	if main._ui_ctrl_mode_btn and main.controller_mapper:
@@ -2222,3 +2636,42 @@ func set_disconnect_visible(vis: bool):
 	if main._ui_disconnect_btn:
 		main._ui_disconnect_btn.visible = vis or _current_tab == PCVR_PAGE
 		main._ui_disconnect_btn.disabled = not vis
+
+func open_grid_spacing_popup() -> void:
+	open_placement_grid_popup(true)
+
+func open_grid_curve_slider() -> void:
+	clear_tooltip()
+	var start: int = main.settings.placement_grid_curve
+	var apply := func(value): main.placement_grid.set_curve(int(value))
+	var commit := func(value):
+		apply.call(value)
+		main.state_manager.save_state()
+		update_monitor_tab()
+	_settings_popup.open_slider("Grid Curve", start, 0, 100, 1, "%", apply, commit,
+		func(): apply.call(start), "Default", func(): commit.call(0))
+	refresh_ui_buttons()
+
+func open_placement_grid_popup(spacing: bool) -> void:
+	var choices: Array = []
+	if spacing:
+		for step in ScreenPlacementGrid.SPACINGS:
+			choices.append({"id": step, "label": "%d cm" % roundi(step * 100)})
+	else:
+		for index in range(ScreenPlacementGrid.LABELS.size()):
+			choices.append({"id": index, "label": ScreenPlacementGrid.LABELS[index]})
+	var current = main.settings.placement_grid_spacing if spacing else main.settings.placement_grid_shape
+	_settings_popup.open_choices("Grid Spacing" if spacing else "Grid Shape", choices, current, func(value):
+		if spacing: main.settings.placement_grid_spacing = float(value)
+		else: main.settings.placement_grid_shape = int(value)
+		# Changing the shape lays the arrangement onto the new surface where it is;
+		# it never teleports it.
+		if spacing: main.placement_grid.finish()
+		else: main.placement_grid.reshape()
+		main.state_manager.save_state()
+		update_monitor_tab())
+	refresh_ui_buttons()
+
+func update_eye_resolution_btn_state() -> void:
+	if main._ui_eye_res_btn:
+		update_option_btn(main._ui_eye_res_btn, main.settings_controller.get_eye_resolution_label())

@@ -6,15 +6,18 @@
 //! Sunshine. For now Meteor only forwards the traffic; the goal is to have
 //! it compute depth maps on the host GPU and send them alongside the video.
 
+mod audio;
 mod config;
 mod host_background;
 #[cfg(target_os = "linux")]
 mod host_cursor;
 #[cfg(target_os = "linux")]
 mod legacy_host_cursor;
+mod control;
 mod crypto;
 mod depth;
 mod depth_server;
+mod depth_window;
 #[cfg(target_os = "linux")]
 mod desktop;
 #[cfg(windows)]
@@ -23,7 +26,7 @@ mod desktop;
 #[cfg(target_os = "macos")]
 #[path = "desktop_macos.rs"]
 mod desktop;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 mod setup_window;
 #[cfg(target_os = "linux")]
 mod xr_setup;
@@ -38,6 +41,7 @@ mod host;
 use host::view as host_view;
 mod icon;
 mod logfile;
+mod menu;
 mod mic;
 mod net;
 mod ncnn;
@@ -75,6 +79,8 @@ mod xr_library;
 mod xr_bitrate;
 mod xr_foveation;
 mod xr_launch_intent;
+#[cfg(target_os = "linux")]
+mod xr_activation;
 mod xr_data;
 mod xr_audio;
 #[cfg(target_os = "linux")]
@@ -94,6 +100,10 @@ mod xr_steam_windows;
 mod xr_steamvr_windows;
 #[cfg(windows)]
 mod xr_windows;
+#[cfg(windows)]
+mod pcvr_window;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod xr_detect;
 
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
@@ -107,9 +117,19 @@ use crate::status::Status;
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     if args.get(1).is_some_and(|arg| arg == "--setup") {
-        std::process::exit(setup_window::run());
+        std::process::exit(setup_window::run(args.get(2).map(std::path::PathBuf::from)));
+    }
+    if args.get(1).is_some_and(|arg| arg == "--depth-settings") {
+        let Some(socket) = args.get(2) else {
+            eprintln!("--depth-settings needs Meteor's control socket");
+            std::process::exit(2);
+        };
+        std::process::exit(depth_window::run(std::path::PathBuf::from(socket)));
+    }
+    #[cfg(windows)]
+    if args.get(1).is_some_and(|arg| arg == "--pcvr-games") {
+        std::process::exit(pcvr_window::run());
     }
     #[cfg(target_os = "macos")]
     if args.get(1).is_some_and(|arg| arg == "--setup-check") {
@@ -226,6 +246,7 @@ async fn main() {
              \x20 --xr-service-dev <bind>  opt-in XR alongside proxy (explicit --xr-client-key required)\n\
              \x20 --xr-client-key <hex>    allowlisted headset public key for integrated DEV XR\n\
              \x20 --xr-runtime-root <dir>  optional fixed-demo checkout for integrated DEV XR\n\
+             \x20 --xr-auto-runtime       DEV Linux XR activation and temporary registration\n\
              \x20 --xr-dev <checkout> [--smoke]  isolated Linux/USB XR development session\n\
              \x20 --xr-control-dev <bind> <key-file> <client-public-key> [--relay [checkout]]  XR development endpoint\n\
              \x20 --no-depth              don't load the depth model (proxy only)\n\
@@ -242,7 +263,8 @@ async fn main() {
              \x20 --quit-after <seconds>  quit during --replay (tests shutdown)\n\
              \x20 --download-vda          download TensorRT (from NVIDIA, under NVIDIA's licence)\n\
              \x20 --download-host         download/verify the Linux managed host without switching\n\
-             \x20 --download-vda-vulkan <518|392> download the optional Vulkan VDA model\n\
+             \x20 --download-vda-vulkan <518|392|migraphx> download an optional VDA model\n\
+             \x20                         (migraphx: AMD GPUs with ROCm + MIGraphX)\n\
              \x20                         and the VDA graphs, then exit"
         );
         return;
@@ -253,6 +275,7 @@ async fn main() {
     let save = value("--save-depth").map(|dir| (std::path::PathBuf::from(dir), save_every));
 
     let config = config::load();
+    audio::init(config.audio_output);
     #[cfg(target_os = "linux")]
     if flag("--download-host") {
         let Some(release)=host::RELEASE.as_ref() else {
@@ -264,8 +287,8 @@ async fn main() {
         }
     }
     if let Some(variant)=value("--download-vda-vulkan") {
-        let id=match variant.as_str() { "518"=>vda_vulkan::FULL,"392"=>vda_vulkan::FAST,_=>{
-            eprintln!("Choose 518 or 392 for --download-vda-vulkan");std::process::exit(2);
+        let id=match variant.as_str() { "518"=>vda_vulkan::FULL,"392"=>vda_vulkan::FAST,"migraphx"=>vda_vulkan::MIGRAPHX,_=>{
+            eprintln!("Choose 518, 392 or migraphx for --download-vda-vulkan");std::process::exit(2);
         }};
         let directory=config.models_dir.clone().unwrap_or_else(config::default_models_dir);
         let download=download::Download::default();
@@ -372,7 +395,7 @@ async fn main() {
         match crypto::MeteorKey::load_or_create(&config::data_dir().join("meteor.key")) {
             Ok(key) => {
                 let side = config.side_ports(config::DEFAULT_SUNSHINE_PORT);
-                depth_server::start(side.depth, depth.clone(), Arc::new(key), Arc::new(|_| false));
+                depth_server::start(side.depth, depth.clone(), Arc::new(key), Arc::new(|_| false), Arc::new(|a, b| a == b));
             }
             Err(err) => log::warn!("No key, so no depth port: {err}"),
         }
@@ -416,7 +439,14 @@ async fn main() {
     }
     let depth_port = depth.clone().zip(key.clone()).and_then(|(depth, key)| {
         let streaming = stats.clone();
-        depth_server::start(side.depth, depth.clone(), key, Arc::new(move |ip| streaming.is_streaming(ip)))
+        let paths = stats.clone();
+        depth_server::start(
+            side.depth,
+            depth.clone(),
+            key,
+            Arc::new(move |ip| streaming.is_streaming(ip)),
+            Arc::new(move |a, b| paths.same_client(a, b)),
+        )
             .map(|port| (port, depth))
     });
     // Register before exposing tray Quit. The coordinator remains alive while
@@ -434,7 +464,9 @@ async fn main() {
     let mut xr_discovery = None;
     let mut xr_trust = None;
     let mut xr_startup_error = None;
-    let xr_address = dev_xr_address.clone().or_else(|| config.xr.enabled.then(|| config.xr.listen.clone()));
+    // macOS has no XR runtime, but the headset's control connection also carries the host
+    // background (colour-key passthrough), so it always runs there, control only.
+    let xr_address = dev_xr_address.clone().or_else(|| (config.xr.enabled || cfg!(target_os = "macos")).then(|| config.xr.listen.clone()));
     let xr_service = if let Some(address) = xr_address {
         let start = async {
             let address = address.parse::<std::net::SocketAddr>().map_err(std::io::Error::other)?;
@@ -449,6 +481,8 @@ async fn main() {
             let key = key.clone().ok_or_else(|| std::io::Error::other("XR requires Meteor's host key"))?;
             let runtime_root = value("--xr-runtime-root").map(std::path::PathBuf::from)
                 .or_else(|| dev_xr_address.is_none().then(|| config.xr.runtime_root()));
+            #[cfg(target_os = "macos")]
+            let runtime_root: Option<std::path::PathBuf> = { let _ = runtime_root; None };
             let runtime_root = xr_control::validate_runtime_root(runtime_root)?;
             #[cfg(windows)]
             let steam_broker=if let Some(root)=runtime_root.as_ref().filter(|root|root.join("windows-games.json").is_file()) {
@@ -456,11 +490,11 @@ async fn main() {
             }else{None};
             #[cfg(windows)]
             let steamvr_broker=if steam_broker.is_some() {Some(xr_steamvr_windows::start(runtime_root.as_deref())?)}else{None};
-            #[cfg(not(windows))]
+            #[cfg(target_os = "linux")]
             if dev_xr_address.is_none() && !runtime_root.as_ref().is_some_and(|root| root.join("xr-runtime/manifest.json").is_file()) {
                 return Err(std::io::Error::other("Normal XR startup requires an installed managed runtime"));
             }
-            #[cfg(not(windows))]
+            #[cfg(target_os = "linux")]
             if dev_xr_address.is_none() {
                 let root = runtime_root.as_ref().unwrap();
                 let check = tokio::time::timeout(std::time::Duration::from_secs(10),
@@ -475,7 +509,7 @@ async fn main() {
             }
             let listener = net::tcp_listener_at(address).await?;
             let port = listener.local_addr()?.port();
-            let relay_ports = if dev_xr_address.is_none() {
+            let relay_ports = if dev_xr_address.is_none() && !cfg!(target_os = "macos") {
                 let pair = (config.xr.video_port, config.xr.tracking_port);
                 let occupied = firewall::ports(&map, side, true);
                 if pair.0 == 0 || pair.1 == 0 || pair.0 == pair.1 || pair.0 == port || pair.1 == port ||
@@ -490,8 +524,18 @@ async fn main() {
             #[cfg(target_os = "linux")]
             if let Some(trust) = pairing.clone() { desktop::watch_xr_approval(trust); }
             let advertised = if dev_xr_address.is_none() { Some(port) } else { None };
+            #[cfg(target_os = "linux")]
+            let automatic_runtime = if config.xr.automatic_launch || args.iter().any(|arg|arg == "--xr-auto-runtime") {
+                let root = runtime_root.as_ref().ok_or_else(||std::io::Error::other("Automatic XR requires a runtime root"))?;
+                let runtime = std::env::var_os("XDG_RUNTIME_DIR").ok_or_else(||std::io::Error::other("Automatic XR requires XDG_RUNTIME_DIR"))?;
+                let directory = std::path::PathBuf::from(runtime).join("nightfall-meteor");
+                let service = xr_activation::start(root, &directory)?;
+                log::info!("DEV automatic XR listener at {}; runtime selected only for authenticated headset connections",directory.display());
+                Some(service)
+            } else {None};
             let service_config=xr_control::ServiceConfig {
-                key, allowed, enable_relay: true, runtime_root, pairing, relay_ports,
+                key, allowed, enable_relay: !cfg!(target_os = "macos"), runtime_root, pairing, relay_ports,
+                offers: !cfg!(target_os = "macos"),
             };
             let cancel=shutdown.subscribe();
             Ok::<_, std::io::Error>((tokio::spawn(async move {
@@ -499,6 +543,8 @@ async fn main() {
                 let _steam_broker=steam_broker;
                 #[cfg(windows)]
                 let _steamvr_broker=steamvr_broker;
+                #[cfg(target_os = "linux")]
+                let _automatic_runtime = automatic_runtime;
                 xr_control::serve(listener,service_config,cancel).await
             }), advertised))
         }.await;
@@ -543,7 +589,8 @@ async fn main() {
         sunshine_host: config.sunshine_host.clone(),
         side,
         host_ports: host_view.supervisor.is_some(),
-        xr_ports: xr_discovery.map(|port| (port, config.xr.video_port, config.xr.tracking_port)),
+        // macOS runs only the control port (no relay).
+        xr_ports: xr_discovery.map(|port| if cfg!(target_os = "macos") { (port, port, port) } else { (port, config.xr.video_port, config.xr.tracking_port) }),
         sunshine_up: AtomicBool::new(false),
         firewall: std::sync::Mutex::new(firewall::Status::Checking),
     });
@@ -552,6 +599,12 @@ async fn main() {
 
     #[cfg(target_os = "linux")]
     xr_setup::initialize(xr_discovery.is_some(), xr_startup_error);
+    #[cfg(windows)]
+    match xr_windows::retire_xrizer(&xr_windows::root()) {
+        Ok(0) => {}
+        Ok(moved) => log::info!("PCVR: moved {moved} game(s) from xrizer to SteamVR"),
+        Err(error) => log::warn!("PCVR: can't move games from xrizer to SteamVR: {error}"),
+    }
     #[cfg(windows)]
     xr_windows::initialize(xr_discovery.is_some(),xr_startup_error,xr_trust);
 
@@ -568,8 +621,10 @@ async fn main() {
             }
         });
     }
+    #[cfg(unix)]
+    tokio::spawn(control::serve(status.map.sunshine_base, depth.clone()));
     #[cfg(target_os = "linux")]
-    if !no_tray && !tray::run(tray::MeteorTray { status, stats, depth, mic, xr_trust, host: host_view, cursor }).await {
+    if !no_tray && !tray::run(tray::MeteorTray(menu::Sources { status, stats, depth, mic, xr_trust, host: host_view, cursor })).await {
         desktop::notify(
             "Nightfall Meteor is running",
             "There's no tray to show its controls in. On GNOME, the AppIndicator extension adds one.",
@@ -587,14 +642,17 @@ async fn main() {
     }
     #[cfg(target_os = "macos")]
     let menu_bar = (!no_tray).then(|| tray_macos::Tray {
-        status: status.clone(), stats: stats.clone(), depth: depth.clone(), mic: mic.clone(),
-        host: Arc::new(host_view), runtime: tokio::runtime::Handle::current(),
+        sources: menu::Sources { status: status.clone(), stats: stats.clone(), depth: depth.clone(), mic: mic.clone(), host: Arc::new(host_view), xr_trust },
+        runtime: tokio::runtime::Handle::current(),
     });
     #[cfg(not(target_os = "linux"))]
     {
         #[cfg(windows)]
+        tokio::spawn(control::serve(status.map.sunshine_base, depth.clone()));
+        #[cfg(windows)]
         if !no_tray {
-            tray_windows::run(status.clone(), stats.clone(), mic.clone(), depth.clone(), Arc::new(host_view));
+            let xr_trust = xr_windows::state().trust.clone();
+            tray_windows::run(menu::Sources { status: status.clone(), stats: stats.clone(), depth: depth.clone(), mic: mic.clone(), xr_trust, host: Arc::new(host_view) });
         }
         #[cfg(windows)]
         if let Some(d) = &depth {
@@ -645,7 +703,13 @@ async fn main() {
 fn sunshine_vdd_installed() -> bool {
     use std::sync::OnceLock;
     static CACHE: OnceLock<bool> = OnceLock::new();
-    *CACHE.get_or_init(|| {
+    *CACHE.get_or_init(sunshine_vdd_probe)
+}
+
+/// The same check, uncached (Setup asks again after installing the driver).
+#[cfg(windows)]
+fn sunshine_vdd_probe() -> bool {
+    {
         let probe = std::env::current_exe()
             .ok()
             .and_then(|e| e.parent().map(|p| p.join("runtime/host/drivers/sunshine/virtualdisplay_probe.exe")));
@@ -654,7 +718,12 @@ fn sunshine_vdd_installed() -> bool {
             // --check requires admin (ERROR_ACCESS_DENIED without it). Use
             // --diagnose instead: it enumerates control interfaces without
             // opening them, so it works without elevation.
-            let out = std::process::Command::new(&p).arg("--diagnose").output();
+            let mut command = std::process::Command::new(&p);
+            {
+                use std::os::windows::process::CommandExt;
+                command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+            }
+            let out = command.arg("--diagnose").output();
             let Ok(out) = out else { return false; };
             let stdout = String::from_utf8_lossy(&out.stdout);
             // Line is "control_interface_count=1 enumerate_error=0 ..."
@@ -666,7 +735,7 @@ fn sunshine_vdd_installed() -> bool {
                 .and_then(|n| n.parse::<u32>().ok())
                 .is_some_and(|n| n > 0)
         })
-    })
+    }
 }
 
 /// Held for Meteor's whole life (a restart's exec closes it: O_CLOEXEC).

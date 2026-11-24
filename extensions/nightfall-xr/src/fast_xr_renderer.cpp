@@ -14,6 +14,7 @@ NightfallXrRenderer::~NightfallXrRenderer() {
 
 void NightfallXrRenderer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_screen_options", "crop", "key"), &NightfallXrRenderer::set_screen_options);
+	ClassDB::bind_method(D_METHOD("set_crt_mode", "mode"), &NightfallXrRenderer::set_crt_mode);
 	ClassDB::bind_method(D_METHOD("consume_reference_space_changes"), &NightfallXrRenderer::consume_reference_space_changes);
 	ClassDB::bind_method(D_METHOD("set_presentation_suspended", "suspended"), &NightfallXrRenderer::set_presentation_suspended);
 	ClassDB::bind_method(D_METHOD("register_provider"), &NightfallXrRenderer::register_provider);
@@ -26,6 +27,8 @@ void NightfallXrRenderer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("has_stale_eye_layer"), &NightfallXrRenderer::has_stale_eye_layer);
 	ClassDB::bind_method(D_METHOD("consume_pending_resize_failure"), &NightfallXrRenderer::consume_pending_resize_failure);
 	ClassDB::bind_method(D_METHOD("supports_cylinder"), &NightfallXrRenderer::supports_cylinder);
+	ClassDB::bind_method(D_METHOD("supports_equirect"), &NightfallXrRenderer::supports_equirect);
+	ClassDB::bind_method(D_METHOD("set_sphere_band", "upper", "lower"), &NightfallXrRenderer::set_sphere_band);
 	ClassDB::bind_method(D_METHOD("supports_compositor_sharpening"), &NightfallXrRenderer::supports_compositor_sharpening);
 	ClassDB::bind_method(D_METHOD("set_geometry", "transform", "width", "height", "curvature", "radius", "central_angle", "sort_order", "bezel_enabled"), &NightfallXrRenderer::set_geometry);
 	ClassDB::bind_method(D_METHOD("set_compositor_sharpening", "mode"), &NightfallXrRenderer::set_compositor_sharpening);
@@ -34,6 +37,7 @@ void NightfallXrRenderer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_depth_refinement", "alignment", "cleanup"), &NightfallXrRenderer::set_depth_refinement);
 	ClassDB::bind_method(D_METHOD("upload_overlay", "pixels", "width", "height"), &NightfallXrRenderer::upload_overlay);
 	ClassDB::bind_method(D_METHOD("set_overlay_visible", "visible"), &NightfallXrRenderer::set_overlay_visible);
+	ClassDB::bind_method(D_METHOD("set_overlay_message_height", "height"), &NightfallXrRenderer::set_overlay_message_height);
 	ClassDB::bind_method(D_METHOD("request_crop_sample"), &NightfallXrRenderer::request_crop_sample);
 	ClassDB::bind_method(D_METHOD("consume_crop_sample"), &NightfallXrRenderer::consume_crop_sample);
 	ClassDB::bind_method(D_METHOD("request_ambient_sample"), &NightfallXrRenderer::request_ambient_sample);
@@ -258,6 +262,8 @@ bool NightfallXrRenderer::has_rendered_frame() const { return false; }
 bool NightfallXrRenderer::has_stale_eye_layer() const { return false; }
 bool NightfallXrRenderer::consume_pending_resize_failure() { return false; }
 bool NightfallXrRenderer::supports_cylinder() const { return false; }
+bool NightfallXrRenderer::supports_equirect() const { return false; }
+void NightfallXrRenderer::set_sphere_band(float, float) {}
 bool NightfallXrRenderer::supports_compositor_sharpening() const { return false; }
 void NightfallXrRenderer::set_geometry(const Transform3D &, float, float, int, float, float, int, bool) {}
 void NightfallXrRenderer::set_compositor_sharpening(int) {}
@@ -266,6 +272,7 @@ void NightfallXrRenderer::set_depth_refinement(bool, bool) {}
 void NightfallXrRenderer::submit_frame(bool, uint32_t, uint32_t, uint32_t, PackedFloat32Array, float, float, bool, float, bool, bool, uint64_t, int, uint64_t, int, float, float, float, float, int) {}
 void NightfallXrRenderer::upload_overlay(PackedByteArray, int, int) {}
 void NightfallXrRenderer::set_overlay_visible(bool) {}
+void NightfallXrRenderer::set_overlay_message_height(int) {}
 void NightfallXrRenderer::request_crop_sample() {}
 PackedByteArray NightfallXrRenderer::consume_crop_sample() { return PackedByteArray(); }
 void NightfallXrRenderer::request_ambient_sample() {}
@@ -274,6 +281,7 @@ float NightfallXrRenderer::get_warp_gpu_ms() { return 0.0f; }
 void NightfallXrRenderer::set_debug_solid_color(bool) {}
 void NightfallXrRenderer::set_primary_crop(PackedFloat32Array) {}
 void NightfallXrRenderer::set_screen_options(PackedFloat32Array, Color) {}
+void NightfallXrRenderer::set_crt_mode(int) {}
 void NightfallXrRenderer::set_secondary_screens(Array) {}
 int NightfallXrRenderer::get_secondary_screen_count() const { return 0; }
 #endif

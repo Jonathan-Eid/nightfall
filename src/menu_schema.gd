@@ -6,6 +6,35 @@ const TARGET_SETTINGS := &"settings"
 const TARGET_SCREEN := &"screen"
 const TARGET_CONTROLLER := &"controller"
 
+const CHOICE_ACTIONS := {
+	&"on_sbs_toggled": &"sbs",
+	&"toggle_hand_tracking": &"tracking",
+	&"on_ai_3d_cursor_position_toggled": &"cursor_position",
+	&"on_language_pressed": &"language",
+	&"cycle_background": &"background",
+	&"cycle_cursor_mode": &"cursor",
+	&"cycle_steady": &"steady",
+	&"cycle_double_click_mode": &"double_click",
+	&"cycle_ambient_mode": &"ambient",
+	&"cycle_ambient_color": &"ambient_colour",
+	&"cycle_brightness": &"brightness",
+	&"cycle_contrast": &"contrast",
+	&"cycle_gamma": &"gamma",
+	&"cycle_sharpen_mode": &"sharpen",
+	&"cycle_audio_boost": &"volume",
+	&"cycle_audio_output": &"audio_output",
+	&"cycle_idle_timeout": &"idle",
+	&"cycle_passthrough_fade": &"pt_fade",
+	&"cycle_curvature": &"curve",
+	&"cycle_type": &"device_mode",
+	&"cycle_btn_toggle": &"alternate",
+	&"cycle_primary_hand": &"primary",
+	&"cycle_screen_crop": &"crop",
+	&"cycle_screen_key": &"key",
+	&"cycle_screen_key_tolerance": &"key_tolerance",
+	&"cycle_screen_crt": &"crt",
+}
+
 static func get_tab_buttons() -> Array:
 	return [
 		_tab_button(&"_tab_btn_display", "Display", 0, "Configure the screen and its surrounding environment."),
@@ -13,13 +42,13 @@ static func get_tab_buttons() -> Array:
 		_tab_button(&"_tab_btn_control", "Control", 2, "Configure pointers, hand tracking, and controller mapping."),
 		_tab_button(&"_tab_btn_ai3d", "AI 3D", 3, "Configure local AI stereoscopic depth conversion."),
 		_tab_button(&"_tab_btn_picture", "Picture", 4, "Adjust the streamed image."),
-		_tab_button(&"_tab_btn_monitors", "Screens", 5, "Choose screen content: PC or browser.", true, OS.get_name() != "Android", 1.0 if OS.get_name() == "Android" else 0.3),
+		_tab_button(&"_tab_btn_monitors", "Screens", 5, "Choose screen content: PC or browser.", true, not SettingsPlatformPolicy.multi_screen_available(), 1.0 if SettingsPlatformPolicy.multi_screen_available() else 0.3),
 		# Settings has no tab button: the gear in the top bar opens it.
 		_tab_button(&"_tab_btn_settings", "Settings", 6, "Configure language, diagnostics, and connection options.", false, true),
 	]
 
 static func get_tabs() -> Array:
-	return [
+	var tabs: Array = [
 	{
 		"id": &"display",
 		"node_name": &"TabDisplay",
@@ -51,7 +80,7 @@ static func get_tabs() -> Array:
 			{
 				"node_name": &"StreamRow1",
 				"options": [
-					_option(&"_ui_res_btn", "Resolution", "100%", "Choose the resolution requested from the host.", TARGET_SETTINGS, &"cycle_resolution"),
+					_option(&"_ui_res_btn", "Default Res", "100%", "Choose the resolution requested from the host.", TARGET_SETTINGS, &"cycle_resolution"),
 					_option(&"_ui_fps_btn", "FPS", "60", "Choose the stream frame rate and matching headset refresh rate.", TARGET_SETTINGS, &"cycle_fps"),
 					_option(&"_ui_bitrate_btn", "Bitrate", "Auto", "Control stream bandwidth and image quality.", TARGET_SETTINGS, &"cycle_bitrate"),
 					_option(&"_ui_crop_btn", "Crop", "Off", "Auto-detect black bars on the primary screen.", TARGET_SETTINGS, &"cycle_screen_crop"),
@@ -60,10 +89,13 @@ static func get_tabs() -> Array:
 			{
 				"node_name": &"StreamRow2",
 				"options": [
-					_option(&"_ui_codec_btn", "Codec", "HEVC", "Video codec. PyroWave suits fast 2D streaming; avoid it with AI 3D.", TARGET_SETTINGS, &"cycle_codec"),
+					_option(&"_ui_codec_btn", "Codec", "HEVC", "Choose the video codec. H.264+ enables a higher bitrate range.", TARGET_SETTINGS, &"cycle_codec"),
 					_option(&"_ui_hdr_btn", "HDR", "Off", "Request HDR when the host display uses it; tone-mapped for the headset.", TARGET_SETTINGS, &"toggle_hdr", OS.get_name() == "Android"),
 					_option(&"_ui_audio_boost_btn", "Volume", "Normal", "Boost quiet stream audio. Loud peaks are softly limited to avoid clipping.", TARGET_SETTINGS, &"cycle_audio_boost"),
-					_option(&"_ui_usb_link_btn", "USB Link", "Off", "Stream over a USB-C cable instead of Wi-Fi, once the host is reachable over it.", TARGET_SETTINGS, &"toggle_usb_link", OS.get_name() == "Android"),
+					# One network slot: USB Link exists on Android; Multipath where a
+					# second network is configured (NF_MULTIPATH_REMOTE, Linux headsets).
+					_option(&"_ui_usb_link_btn", "USB Link", "Off", "Stream over a USB-C cable instead of Wi-Fi, once the host is reachable over it.", TARGET_SETTINGS, &"toggle_usb_link", true) if OS.get_name() == "Android"
+						else _option(&"_ui_multipath_btn", "Multipath", "Auto", "Use a second network via Meteor; a slow one is paused.", TARGET_SETTINGS, &"toggle_multipath", not OS.get_environment("NF_MULTIPATH_REMOTE").strip_edges().is_empty()),
 				],
 			},
 		],
@@ -108,7 +140,7 @@ static func get_tabs() -> Array:
 			{
 				"node_name": &"PictureRow2",
 				"options": [
-					_option(&"_ui_sharpen_btn", "Sharpen", "Off", "Apply native runtime sharpening to the streamed image.", TARGET_SETTINGS, &"cycle_sharpen_mode"),
+					_option(&"_ui_crt_btn", "CRT Filter", "Off", "Old CRT look for the main screen. Fine uses smaller lines, like a PC monitor.", TARGET_SETTINGS, &"cycle_screen_crt"),
 					_option(&"_ui_key_btn", "Colour Key", "Off", "Show your room through a solid background colour.", TARGET_SETTINGS, &"cycle_screen_key"),
 					_option(&"_ui_key_tolerance_btn", "Key Tolerance", "Medium", "Remove similar colours and compression fringes.", TARGET_SETTINGS, &"cycle_screen_key_tolerance"),
 					_option(&"_ui_host_background_btn", "Set Host Background", "Off", "Temporarily match the host wallpaper to Colour Key.", TARGET_SETTINGS, &"toggle_host_background"),
@@ -150,21 +182,32 @@ static func get_tabs() -> Array:
 				"title": "General",
 				"options": [
 					_option(&"_ui_language_btn", "Language", "English", "Choose the language used by Nightfall's menus.", TARGET_UI, &"on_language_pressed"),
+					_option(&"_ui_extended_bitrate_btn", "Extended Bitrate", "Off", "Double desktop and PCVR bitrate limits. Needs fast network and decoding.", TARGET_SETTINGS, &"toggle_extended_bitrate_limits"),
 				],
 			},
 			{
 				"node_name": &"SettingsInputRow",
 				"title": "Input",
 				"options": [
+					_option(&"_ui_grip_scroll_btn", "Grip Scroll", "Off", "Grip-drag to scroll, replacing right-click. Mapping must be off.", TARGET_SETTINGS, &"toggle_grip_scroll"),
 					_option(&"_ui_double_click_btn", "Double Click", "Standard", "Choose how double-click input is triggered.", TARGET_SETTINGS, &"cycle_double_click_mode"),
+				],
+			},
+			{
+				"node_name": &"SettingsScreensRow",
+				"title": "Screens",
+				"options": [
+					_option(&"_ui_grid_spacing_btn", "Grid Spacing", "10 cm", "Grid point spacing. Slow drags and resizes snap to it.", TARGET_UI, &"open_grid_spacing_popup"),
 				],
 			},
 			{
 				"node_name": &"SettingsDisplayRow",
 				"title": "Display",
 				"options": [
+					_option(&"_ui_ambient_gain_btn", "Ambient Intensity", "100%", "Adjust ambient lighting strength.", TARGET_UI, &"open_ambient_gain_popup"),
 					_option(&"_ui_high_refresh_btn", "High Refresh Rates", "Off", "Offer 200 and 207 Hz. They can glitch the headset.", TARGET_SETTINGS, &"toggle_high_refresh_rates"),
 					_option(&"_ui_host_cursor_btn", "Host Cursor", "Off", "Show or hide the host operating system cursor when supported.", TARGET_SETTINGS, &"toggle_host_cursor"),
+					_option(&"_ui_sharpen_btn", "Sharpen", "Off", "Apply native runtime sharpening to the streamed image.", TARGET_SETTINGS, &"cycle_sharpen_mode"),
 				],
 			},
 			{
@@ -194,7 +237,18 @@ static func get_tabs() -> Array:
 			},
 		],
 	},
-]
+	]
+	# Linux only (EyeResolution): one control, Full or Auto 1-6 (strength), in
+	# Settings > Display (the main tabs' fixed-size rows are full).
+	if EyeResolution.wanted():
+		for tab in tabs:
+			if tab["id"] != &"settings":
+				continue
+			for row in tab["rows"]:
+				if row.get("title", "") == "Display" and row["options"].size() < 4:
+					row["options"].append(_option(&"_ui_eye_res_btn", "Screen Res", "Full",
+						"Match screen sharpness to the headset to save GPU time.", TARGET_SETTINGS, &"cycle_eye_resolution"))
+	return tabs
 
 static func _option(
 	field: StringName,
@@ -213,6 +267,7 @@ static func _option(
 		"tooltip": tooltip,
 		"target": target,
 		"action": action,
+		"choice": CHOICE_ACTIONS.get(action, &""),
 		"visible": visible,
 		"disabled": disabled,
 	}

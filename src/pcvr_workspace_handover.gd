@@ -238,8 +238,9 @@ func _enforce_hidden() -> void:
 	# lifecycle callbacks can still update child visibility/content while hidden.
 	main.visible = desktop_visible or menu_only
 	_set_screen_rendering(desktop_visible or menu_only)
+	# Keep desktop audio unless the independent XR audio transport is active.
 	main.audio_player.stream_paused = _independent_audio or not main.is_streaming or bool(_saved.get("audio_paused", true))
-	main.meteor_microphone.set_paused(true)
+	# Keep the microphone in its prior state for in-game voice chat.
 	main.native_xr_renderer.set_presentation_suspended(not desktop_visible)
 	var interface = _xr_interface()
 	if interface:

@@ -47,6 +47,54 @@ Quest validation remains; working Monado/xrizer remains available.
 > Apollo, Vibepollo or Vibeshine. NVIDIA keeps NVDEC; AMD uses D3D11VA and
 > ncnn Vulkan for EdgePad.
 
+## Windows build after the November upstream merge (2026-11-16)
+
+Vibepollo `master` after the November upstream merge needs three things on
+Windows that the Linux side doesn't exercise:
+
+- **.NET SDK.** The build compiles upstream's Playnite plugin; pass
+  `-DSUNSHINE_DOTNET_EXECUTABLE=<dotnet.exe>` to CMake (a per-user SDK from
+  `dotnet-install.ps1` is enough).
+- **The 32-bit Vulkan HDR layer.** The driver package's `install.ps1` now
+  validates `vulkan-layer\VkLayer_sunshine_hdr_x86.dll`, which isn't in git.
+  Build it from the pinned libvirtualdisplay with an x86 toolchain, as
+  Vibepollo's `refresh_driver_package.ps1` does:
+
+  ```
+  cmake -S meteor/target/windows-vibepollo-src/packaging/windows/virtual_display_driver/vulkan_layer_x86 ^
+        -B meteor/target/windows-vulkan-layer-x86 -G "Visual Studio 17 2022" -A Win32 ^
+        -DLIBVIRTUALDISPLAY_DIR=meteor/target/windows-vibepollo-src/third-party/libvirtualdisplay
+  cmake --build meteor/target/windows-vulkan-layer-x86 --config Release --target check_vulkan_layer_export
+  ```
+
+  `stage_windows_runtime.ps1` adds it to the staged driver package.
+- **MinGW-specific build fixes** (Vibepollo `windows-build-fix`): Meteor's
+  virtual display sizing used locals the merge folded into `recovery_params`,
+  and an `inline thread_local` of non-trivial type doesn't link with MinGW.
+
+## OpenVR games run through SteamVR on Windows (2026-11-21)
+
+This replaces the November 4 direction below (xrizer on both platforms).
+Windows now does what Virtual Desktop does: every OpenVR game runs through
+SteamVR with Meteor's SteamVR driver (direct D3D11 capture, NVENC or AMF).
+xrizer reimplements OpenVR, so anti-cheat (EAC rejected its
+`vrclient_x64.dll`), SteamVR overlays, bindings and some games break, and
+on Windows the real SteamVR is available. Linux keeps xrizer: there's no
+SteamVR driver path there.
+
+- Setup registers every Steam VR game with only its SteamVR profile; the
+  Moss Monado/xrizer profile is gone.
+- On start, Meteor moves catalog entries whose Monado profile is an xrizer
+  one (OpenVR runtime, no SteamVR driver) to SteamVR, or to "needs SteamVR"
+  without a SteamVR profile (`xr_windows::retire_xrizer`).
+- xrizer is no longer staged; the installer deletes `runtime\xr\xrizer`.
+- Monado stays, for games registered as native OpenXR. Next step, like
+  Virtual Desktop's VDXR: make Monado the active OpenXR runtime while
+  streaming, so OpenXR games skip SteamVR. That needs a way to tell native
+  OpenXR games apart and an elevated switch of the system's active runtime.
+- The PCVR menu offers a runtime choice only when a game has both; games
+  with one runtime show it as a line.
+
 ## Windows compatibility update (2026-10-29)
 
 November 4 direction change: user requested switching away from Moss to

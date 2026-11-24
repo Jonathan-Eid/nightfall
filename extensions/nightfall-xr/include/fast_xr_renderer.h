@@ -78,6 +78,8 @@ public:
 	bool is_started() const;
 	bool has_rendered_frame() const;
 	bool supports_cylinder() const;
+	bool supports_equirect() const;
+	static constexpr int SPHERE_CURVATURE = 3;
 	bool supports_compositor_sharpening() const;
 	// True when one eye's composition layer hasn't actually been re-queried
 	// by Godot for several consecutive frames while the other eye keeps
@@ -96,6 +98,8 @@ public:
 	// 0=None, 1=normal sharpening, 2=quality sharpening. This is applied by
 	// the OpenXR runtime after composition, with no video-shader sampling cost.
 	void set_compositor_sharpening(int p_mode);
+	// Curvature 3 (sphere grid): latitude band, radians, of the primary layer.
+	void set_sphere_band(float p_upper, float p_lower);
 	// Optional AI-depth synchronization. A bounded three-texture ring retains
 	// the current and two preceding decoder frames only while this is enabled.
 	void set_depth_sync(bool p_enabled, int p_delay_frames);
@@ -106,6 +110,10 @@ public:
 	// means the whole frame.
 	void set_primary_crop(PackedFloat32Array p_crop);
 	void set_screen_options(PackedFloat32Array p_crop, Color p_key);
+	// CRT look on the primary (scanlines, phosphor mask, vignette): 0 = off,
+	// 1 = normal (TV-sized lines), 2 = fine (monitor-sized lines). SDR only;
+	// HDR streams draw as usual.
+	void set_crt_mode(int p_mode);
 	Array consume_reference_space_changes();
 	static void track_reference_space_event(const void *p_event);
 	static void clear_reference_space_changes();
@@ -148,6 +156,7 @@ public:
 
 	void upload_overlay(PackedByteArray p_pixels, int p_width, int p_height);
 	void set_overlay_visible(bool p_visible);
+	void set_overlay_message_height(int p_height);
 	// Requests a tiny asynchronous sample of the final native left-eye image
 	// for the ambient-light layer. consume_ambient_sample() returns an empty
 	// array until a requested GPU readback has completed.
@@ -287,6 +296,7 @@ private:
 	GLuint overlay_program = 0;
 	bool overlay_has_content = false;
 	bool overlay_visible = false;
+	std::atomic<int> overlay_message_height{0};
 
 	int video_width = 0;
 	int video_height = 0;
@@ -299,6 +309,8 @@ private:
 	GLuint delayed_warp_program = 0;
 	GLuint delayed_picture_warp_program = 0;
 	GLuint delayed_hdr_warp_program = 0;
+	GLuint crt_warp_program = 0;
+	GLuint delayed_crt_warp_program = 0;
 	struct WarpUniforms {
 		GLint texmatrix = -1;
 		GLint disparity = -1;
@@ -318,6 +330,7 @@ private:
 		GLint brightness = -1;
 		GLint contrast = -1;
 		GLint gamma = -1;
+		GLint crt = -1;
 	};
 	WarpUniforms warp_uniforms;
 	WarpUniforms picture_warp_uniforms;
@@ -325,6 +338,8 @@ private:
 	WarpUniforms delayed_warp_uniforms;
 	WarpUniforms delayed_picture_warp_uniforms;
 	WarpUniforms delayed_hdr_warp_uniforms;
+	WarpUniforms crt_warp_uniforms;
+	WarpUniforms delayed_crt_warp_uniforms;
 	GLuint hdr_lut_texture = 0;
 	GLuint warp_fbo = 0;
 	bool debug_solid_color = false;
@@ -399,6 +414,7 @@ private:
 
 	bool srgb_write_control = false;
 	bool cylinder_supported = false;
+	bool equirect_supported = false;
 	bool compositor_sharpening_supported = false;
 	bool ever_rendered = false;
 	bool registered_as_layer_provider = false;
@@ -479,8 +495,15 @@ private:
 	int pending_curvature = 0;
 	float pending_radius = 4.0f;
 	float pending_central_angle = 0.75f;
+	float pending_upper = 0.0f, pending_lower = 0.0f;
 	int pending_sort_order = 1;
 	bool pending_bezel_enabled = true;
+	int pending_crt_mode = 0;
+	// The swapchain reserves room for the bezel on every side, so turning it
+	// on or off never rebuilds it: the video always sits at BEZEL_RESERVE,
+	// and the layer shows the video plus bezel_px() around it.
+	static constexpr int BEZEL_RESERVE = 8;
+	int bezel_px() const { return pending_bezel_enabled ? BEZEL_RESERVE : 0; }
 	int pending_compositor_sharpening = 0;
 
 	// Incremented once per _get_composition_layer_count() call (confirmed
@@ -515,6 +538,10 @@ private:
 	// the returned pointer back out after this call returns.
 	XrCompositionLayerQuad quad_layers[2]{};
 	XrCompositionLayerCylinderKHR cylinder_layers[2]{};
+	XrCompositionLayerEquirect2KHR equirect_layers[2]{};
+	void fill_sphere_band(XrCompositionLayerEquirect2KHR *p_band, const void *p_next, XrEyeVisibility p_eye,
+			const XrSwapchainSubImage &p_sub_image, XrSpace p_space, const XrPosef &p_pose, float p_radius,
+			float p_horizontal, float p_upper, float p_lower, float p_grow_y);
 	XrCompositionLayerSettingsFB compositor_settings[2]{};
 
 	// Resolved via get_openxr_api()->get_instance_proc_addr(), matching how
@@ -566,10 +593,12 @@ private:
 		float width = 1.0f, height = 1.0f;
 		int curvature = 0;
 		float radius = 1.0f, central_angle = 0.5f;
+		float upper = 0.0f, lower = 0.0f;
 		int sort_order = 1;
 		bool rendered = false;
 		XrCompositionLayerQuad quad{};
 		XrCompositionLayerCylinderKHR cylinder{};
+		XrCompositionLayerEquirect2KHR equirect{};
 		XrCompositionLayerSettingsFB settings{};
 	};
 	std::mutex secondary_mutex;

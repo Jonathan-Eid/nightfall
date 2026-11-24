@@ -39,7 +39,8 @@ UsbNcm driver to be available; it does not install a network driver.
 
 Setup offers the built-in host and PCVR. It discovers installed VR games from
 Steam's VR application manifest across your Steam libraries. SteamVR handles
-general VR games; Moss also has a Monado/xrizer profile. It encodes with NVENC on
+every VR game, as other PC streamers do (Linux uses Monado and xrizer instead,
+with no SteamVR driver to rely on). It encodes with NVENC on
 NVIDIA GPUs and AMF on AMD GPUs; older AMD encoders stop at 4096 pixels per
 side, so the headset sends smaller eyes to fit. Install SteamVR through Steam. PCVR setup registers Meteor's bundled
 SteamVR driver automatically. SteamVR and games are not redistributed.

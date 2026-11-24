@@ -56,6 +56,8 @@ pub struct Config {
     pub host_env: std::collections::BTreeMap<String, String>,
     /// Optional managed XR service; disabled until explicitly configured.
     pub xr: XrConfig,
+    /// Where a stream's sound plays (see audio.rs).
+    pub audio_output: crate::audio::Output,
 }
 
 impl Default for Config {
@@ -74,6 +76,7 @@ impl Default for Config {
             host_binary: None,
             host_env: Default::default(),
             xr: XrConfig::default(),
+            audio_output: crate::audio::Output::default(),
         }
     }
 }
@@ -97,6 +100,8 @@ impl Config {
 #[serde(default)]
 pub struct XrConfig {
     pub enabled: bool,
+    /// Linux opt-in runtime discovery; no per-game Meteor wrapper required.
+    pub automatic_launch: bool,
     pub listen: String,
     pub video_port: u16,
     pub tracking_port: u16,
@@ -110,7 +115,7 @@ pub struct XrConfig {
 
 impl Default for XrConfig {
     fn default() -> Self {
-        Self { enabled: false, listen: "[::]:47910".into(), video_port: 47911, tracking_port: 47912, allowed_client: None, runtime_root: None, encoder_backend: "auto".into(), render_device: None }
+        Self { enabled: false, automatic_launch: false, listen: "[::]:47910".into(), video_port: 47911, tracking_port: 47912, allowed_client: None, runtime_root: None, encoder_backend: "auto".into(), render_device: None }
     }
 }
 

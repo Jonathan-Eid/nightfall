@@ -158,11 +158,11 @@ func _test_legacy_app_migrations() -> void:
 	assert(not settings.passthrough_enabled)
 	assert(settings.background_mode == 2)
 	assert(settings.pointer_steady == 1)
-	assert(settings.brightness_pct == 0)
+	assert(settings.brightness_pct == 13)
 	assert(settings.contrast_pct == 100)
 	assert(settings.gamma_pct == 100)
 	assert(settings.sharpen_mode == 0)
-	assert(settings.audio_boost_db == 0)
+	assert(settings.audio_boost_db == 7)
 
 	# Old saves stored 0 Stream / 1 AI 3D under "gpu_priority"; AI 3D is now 2.
 	var legacy_ai_3d := ConfigFile.new()

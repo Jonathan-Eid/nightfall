@@ -143,6 +143,14 @@ static func xr_info(info: Dictionary) -> Dictionary:
 	if (not protocol is int and not protocol is float) or protocol != 1: return {}
 	return {"port": port, "key": meteor_key(info)}
 
+## True when this Meteor copies every stream packet to each network path a
+## client pings from (multipath). A plain host sends the stream to whichever
+## path pinged last, so the client must only use a second path when this is
+## true.
+static func multipath_supported(info: Dictionary) -> bool:
+	var multipath = info.get("multipath", {})
+	return multipath is Dictionary and int(multipath.get("protocol", 0)) >= 1
+
 ## Meteor's microphone offer ({port, formats, encryption, key, opus}), or {} when
 ## it has no microphone device, or none in a format and encryption this
 ## client sends.
@@ -201,12 +209,13 @@ static func virtual_display_info(info: Dictionary) -> Dictionary:
 	return {"driver_installed": true, "max_count": int(vd.get("max_count", 1))}
 
 ## Sends POST /meteor/virtual to request virtual display creation or removal.
-## count must be 0 (disable) or 1 (enable). Calls back with true on success.
+## count is 0 through the advertised maximum. Calls back with true on success.
 static func post_virtual(owner: Node, host: String, sunshine_https_port: int, count: int, callback: Callable) -> void:
 	var port := discovery_port(sunshine_https_port)
 	var url := "http://%s:%d/meteor/virtual" % [host, port]
 	var body := JSON.stringify({"count": count})
 	var request := HTTPRequest.new()
+	request.timeout = 6.0
 	owner.add_child(request)
 	var err := request.request(url, ["Content-Type: application/json"], HTTPClient.METHOD_POST, body)
 	if err != OK:
@@ -240,3 +249,34 @@ static func depth_info(info: Dictionary) -> Dictionary:
 	var offer: Dictionary = depth.duplicate()
 	offer["key"] = meteor_key(info)
 	return offer
+
+## Advisory process liveness. Paired host requests still establish actual readiness.
+## Where Meteor says a stream's sound plays: "headset", "pc" or "both". ""
+## when the host doesn't say, which plays on both (Moonlight's own default).
+const AUDIO_OUTPUTS := ["headset", "pc", "both"]
+
+static func audio_output(info: Dictionary) -> String:
+	var audio = info.get("audio", {})
+	var output := str(audio.get("output", "")) if audio is Dictionary else ""
+	return output if output in AUDIO_OUTPUTS else ""
+
+## Moonlight's localAudioPlayMode for that choice: 0 mutes the PC while it
+## streams the sound; 1 keeps the PC playing too. "PC" only also mutes the
+## headset's own playback, so it streams with 1.
+static func local_audio_play_mode(output: String) -> int:
+	return 0 if output == "headset" else 1
+
+static func host_status(owner: Node, host: String, sunshine_https_port: int) -> Dictionary:
+	var request := HTTPRequest.new()
+	request.timeout = 1.0
+	owner.add_child(request)
+	var url := "http://%s:%d/meteor/host-status" % [host, discovery_port(sunshine_https_port)]
+	if request.request(url) != OK:
+		request.queue_free()
+		return {}
+	var result: Array = await request.request_completed
+	request.queue_free()
+	if result[0] != HTTPRequest.RESULT_SUCCESS or result[1] != 200: return {}
+	var json := JSON.new()
+	if json.parse(PackedByteArray(result[3]).get_string_from_utf8()) != OK: return {}
+	return json.data if json.data is Dictionary else {}

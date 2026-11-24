@@ -6,6 +6,7 @@ var workspace_stability: WorkspaceStability
 var _ui_crop_btn: Button
 var _ui_host_background_btn: Button
 var _ui_key_btn: Button
+var _ui_crt_btn: Button
 var _ui_key_tolerance_btn: Button
 
 var session_lifecycle: SessionLifecycle = SessionLifecycle.new()
@@ -25,6 +26,7 @@ var telemetry: PerformanceTelemetry = PerformanceTelemetry.new()
 @onready var config_mgr = ClassDB.instantiate("NightfallConfigManager") if ClassDB.class_exists("NightfallConfigManager") else null
 @onready var comp_mgr = ClassDB.instantiate("NightfallComputerManager") if ClassDB.class_exists("NightfallComputerManager") else null
 var mdns
+var clipboard_sharing = preload("res://src/clipboard_sharing.gd").new(self)
 var stream_backend: StreamBackend
 
 func _get_mdns():
@@ -307,6 +309,7 @@ var _staged_preset_id: StringName = &""
 var _pending_monitor_apply: bool = false
 
 var stream_manager: StreamManager
+var placement_grid: ScreenPlacementController
 var xr_interaction: XRInteraction
 var input_handler: InputHandler
 var ui_controller: UIController
@@ -331,6 +334,7 @@ var composition_panels: CompositionPanelLayers = CompositionPanelLayers.new()
 var composition_environment: CompositionEnvironmentLayer = CompositionEnvironmentLayer.new()
 var composition_pointers: CompositionPointerLayers = CompositionPointerLayers.new()
 var composition_controller_rays: CompositionControllerRays = CompositionControllerRays.new()
+var composition_toast: CompositionToast = CompositionToast.new()
 var composition_controller_markers: CompositionControllerMarkers = CompositionControllerMarkers.new()
 var composition_hand_indicators: CompositionHandIndicators = CompositionHandIndicators.new()
 var composition_screen_controls: CompositionScreenControls = CompositionScreenControls.new()
@@ -506,8 +510,6 @@ var _ui_pt_btn: Button
 var _ui_bg_btn: Button
 var _ui_curve_btn: Button
 var _ui_bezel_btn: Button
-var _ui_monitors_btn: Button
-var _ui_virtual_monitors_btn: Button
 var _ui_apply_preset_btn: Button
 var _ui_save_preset_btn: Button
 var _ui_remove_preset_btn: Button
@@ -526,6 +528,7 @@ var _ui_3d_priority_btn: Button
 var _ui_3d_mode_btn: Button
 var _ui_3d_type_btn: Button
 var _ui_3d_hz_cap_btn: Button
+var _ui_eye_res_btn: Button
 var _ui_3d_separation_btn: Button
 var _ui_3d_convergence_btn: Button
 var _ui_3d_cursor_position_btn: Button
@@ -544,12 +547,15 @@ var _ui_audio_boost_btn: Button
 var _ui_audio_output_btn: Button
 var _ui_usb_link_btn: Button
 var _ui_hdr_btn: Button
+var _ui_multipath_btn: Button
 var _ui_host_cursor_btn: Button
 var _ui_sharpen_btn: Button
 # Picture tab (2026-08-31) - see ui_controller.gd's build_ui() for layout.
 var _ui_brightness_btn: Button
 var _ui_contrast_btn: Button
 var _ui_gamma_btn: Button
+var _ui_grip_scroll_btn: Button
+var _ui_extended_bitrate_btn: Button
 var _ui_ambient_btn: Button
 var _ui_ambient_color_btn: Button
 var _ui_ctrl_mode_btn: Button
@@ -694,11 +700,34 @@ func compute_resolution_options() -> Array:
 func compute_requested_resolution(apply_midas_cap: bool = true) -> Vector2i:
 	var w: int
 	var h: int
-	if settings.host.is_polaris_host:
+	var tab: ScreenContentTab = primary_screen.content_tabs.selected() if primary_screen != null else null
+	var tab_resolution := tab.resolution if tab != null and tab.kind == ScreenContentTab.STREAM else Vector2i.ZERO
+	# A virtual monitor's profile sizes its host output, not the entire packed
+	# video frame. The host's launch-plan reply supplies that frame's dimensions.
+	if primary_screen != null and primary_screen.monitor != null and primary_screen.monitor.hint.get("virtual", false) and layout != null and layout.virtual_modes_supported:
+		tab_resolution = Vector2i.ZERO
+	if layout != null and layout.packing_profiled and settings.host.is_polaris_host:
+		w = settings.host.native_resolution.x
+		h = settings.host.native_resolution.y
+	elif tab_resolution != Vector2i.ZERO:
+		var requested := tab_resolution
+		if settings.host.is_polaris_host:
+			var primary_size := settings.host.native_resolution
+			if layout and layout.source == &"host_manifest" and not layout.enabled_monitors().is_empty():
+				primary_size = layout.enabled_monitors()[0].frame_rect.size
+			requested = DefaultStreamResolution.packed_frame(requested, settings.host.native_resolution, primary_size)
+		w = requested.x
+		h = requested.y
+	elif settings.host.is_polaris_host and not settings.host.default_resolution_selected:
 		w = int(settings.host.native_resolution.x * settings.host.resolution_scale_pct / 100.0)
 		h = int(settings.host.native_resolution.y * settings.host.resolution_scale_pct / 100.0)
 	else:
 		var res: Vector2i = resolutions[settings.host.resolution_idx]
+		if settings.host.is_polaris_host:
+			var primary_size := settings.host.native_resolution
+			if layout and layout.source == &"host_manifest" and not layout.enabled_monitors().is_empty():
+				primary_size = layout.enabled_monitors()[0].frame_rect.size
+			res = DefaultStreamResolution.packed_frame(res, settings.host.native_resolution, primary_size)
 		w = res.x
 		h = res.y
 	# H.264 hardware decoders on this class of mobile SoC commonly cap out at 4096px
@@ -996,13 +1025,32 @@ func screen_cursor_mode(screen: VRScreen) -> int:
 	return settings.cursor_mode
 
 func _update_cursor_layer():
+	if not xr_interaction or xr_interaction.tab_drag_title() == "":
+		composition_pointers.end_drag()
 	if not comp.in_use and not pcvr_handover.menu_only:
 		composition_pointers.hide_primary()
 		composition_pointers.hide_all_embedded(screens)
 		return
+	# Controller mode: no cursor anywhere, including the one drawn on panels
+	# such as a screen's grab bar where the (still tracked) controller points.
+	if pad_hides_pointer():
+		composition_pointers.hide_primary()
+		composition_pointers.hide_secondary()
+		composition_pointers.hide_all_embedded(screens)
+		if pointer_cursor: pointer_cursor.visible = false
+		return
+	# Dragging a tab: the cursor carries the tab's label, also over empty space.
+	if xr_interaction and xr_interaction.tab_drag_title() != "":
+		if composition_pointers.show_drag(xr_interaction.tab_drag_point(), xr_camera.global_position, xr_interaction.tab_drag_title()):
+			composition_pointers.hide_all_embedded(screens)
+			if pointer_cursor: pointer_cursor.visible = false
+			if contact_dot: contact_dot.visible = false
+			return
 	var active_raycast = xr_interaction.get_active_raycast() if xr_interaction else (hand_raycast if is_xr_active else mouse_raycast)
 	var on_screen = false
-	var pad_on_screen = controller_mapper and controller_mapper.is_active() and controller_mapper.is_gamepad_mode()
+	# Same rule as the pointer: only during a stream (the welcome screen is drawn
+	# on a screen too, and lost its cursor when controller mode was left on).
+	var pad_on_screen = pad_hides_pointer()
 	var tp_capturing = virtual_keyboard and virtual_keyboard.visible and virtual_keyboard.trackpad_active
 	var stereo = settings_controller.get_stereo_mode() if settings_controller else 0
 	var use_embedded_cursor = on_screen and not pad_on_screen and not tp_capturing
@@ -1101,16 +1149,32 @@ func _update_laser_layers():
 			right_ray = null
 		else:
 			left_ray = null
+	composition_toast.process()
+	var pad_hides_rays: bool = pad_hides_pointer()
+	if pad_hides_rays:
+		if contact_dot: contact_dot.visible = false
+		var r_laser = get_node_or_null("%Laser")
+		if r_laser: r_laser.visible = false
+		var l_laser = left_hand_raycast.get_node_or_null("Laser") if left_hand_raycast else null
+		if l_laser: l_laser.visible = false
 	composition_controller_rays.update(
 		DEBUG_COMP_LASER,
-		(comp.in_use or pcvr_handover.menu_only) and is_xr_active,
+		(comp.in_use or pcvr_handover.menu_only) and is_xr_active and not pad_hides_rays,
 		xr_camera.global_position,
 		right_ray,
 		left_ray)
 
+## Controller mode during a stream turns the controllers into a gamepad: no
+## rays, markers or contact dot, except while Nightfall's menu or keyboard
+## needs the pointer.
+func pad_hides_pointer() -> bool:
+	return is_streaming and controller_mapper != null and controller_mapper.is_active() \
+			and controller_mapper.is_gamepad_mode() and not ui_visible \
+			and not (virtual_keyboard and virtual_keyboard.visible)
+
 func _update_marker_layers(_delta: float):
 	composition_controller_markers.update(
-		DEBUG_COMP_MARKER and comp.in_use and is_xr_active,
+		DEBUG_COMP_MARKER and comp.in_use and is_xr_active and not pad_hides_pointer(),
 		xr_camera.global_transform.basis,
 		right_hand,
 		left_hand,
@@ -1194,6 +1258,7 @@ func _bind_comp_fallback_texture(stream_tex):
 	comp.bind_fallback_texture(stream_tex)
 
 func _on_stream_started():
+	stream_manager.record_monitor_transition_stage("stream_started")
 	if pcvr_test.is_exclusive():
 		pcvr_test.request_stop()
 		return
@@ -1212,6 +1277,7 @@ func _on_stream_started():
 	ui_controller.set_disconnect_visible(true)
 	_log("[STREAM] Connection started!")
 	settings_controller.apply_audio_boost()
+	stream_manager.watch_audio_output()
 	if not comp.in_use:
 		stream_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
 	welcome_viewport.render_target_update_mode = SubViewport.UPDATE_DISABLED
@@ -1419,6 +1485,7 @@ func _on_stream_terminated(msg: String, err_code: int = 0):
 
 func _full_disconnect_cleanup(status_msg: String, welcome_name: String = "welcome"):
 	if pcvr_test.is_exclusive(): return
+	var preserve_browser: bool = screen_sources != null and screen_sources.has_method("preserves_browser_on_stream_close") and screen_sources.preserves_browser_on_stream_close()
 	if depth_estimator:
 		depth_estimator.set_enabled(false)
 	session_lifecycle.finish_cleanup()
@@ -1429,7 +1496,7 @@ func _full_disconnect_cleanup(status_msg: String, welcome_name: String = "welcom
 	ui_controller.set_status(status_msg)
 	ui_controller.set_disconnect_visible(false)
 	_log("[STREAM] Full disconnect: %s" % status_msg)
-	welcome_screen.show_welcome_screen(welcome_name)
+	if not preserve_browser: welcome_screen.show_welcome_screen(welcome_name)
 	stream_viewport.render_target_update_mode = SubViewport.UPDATE_DISABLED
 	_clear_comp_yuv_textures()
 	# _clear_comp_yuv_textures() shows the ". . ." loading indicator (meant
@@ -1437,14 +1504,15 @@ func _full_disconnect_cleanup(status_msg: String, welcome_name: String = "welcom
 	# goes straight to the welcome screen instead of a fresh stream - hide it
 	# again so it doesn't blink away on top of the welcome screen content.
 	comp.hide_loading_dots()
-	comp_shader_mat.set_shader_parameter("main_texture", get_welcome_content_texture())
-	comp_shader_mat.set_shader_parameter("yuv_mode", 0)
-	if comp_shader_mat_left:
-		comp_shader_mat_left.set_shader_parameter("main_texture", get_welcome_content_texture())
-		comp_shader_mat_left.set_shader_parameter("yuv_mode", 0)
-	if comp_shader_mat_right:
-		comp_shader_mat_right.set_shader_parameter("main_texture", get_welcome_content_texture())
-		comp_shader_mat_right.set_shader_parameter("yuv_mode", 0)
+	if not preserve_browser:
+		comp_shader_mat.set_shader_parameter("main_texture", get_welcome_content_texture())
+		comp_shader_mat.set_shader_parameter("yuv_mode", 0)
+		if comp_shader_mat_left:
+			comp_shader_mat_left.set_shader_parameter("main_texture", get_welcome_content_texture())
+			comp_shader_mat_left.set_shader_parameter("yuv_mode", 0)
+		if comp_shader_mat_right:
+			comp_shader_mat_right.set_shader_parameter("main_texture", get_welcome_content_texture())
+			comp_shader_mat_right.set_shader_parameter("yuv_mode", 0)
 	if not comp.in_use and screen_mesh.material_override is ShaderMaterial:
 		screen_mesh.material_override.set_shader_parameter("yuv_mode", 0)
 		screen_mesh.material_override.set_shader_parameter("tex_y", null)
@@ -1452,10 +1520,10 @@ func _full_disconnect_cleanup(status_msg: String, welcome_name: String = "welcom
 		screen_mesh.material_override.set_shader_parameter("tex_v", null)
 	stream_manager.teardown_v2_yuv_rect()
 	welcome_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
-	if comp.available:
+	if comp.available and not preserve_browser:
 		_switch_to_comp_layer()
 		comp_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
-	else:
+	elif not preserve_browser:
 		if not comp.in_use:
 			screen_mesh.material_override.set_shader_parameter("main_texture", get_welcome_content_texture())
 		_switch_to_mesh_rendering()
@@ -1468,7 +1536,7 @@ func _full_disconnect_cleanup(status_msg: String, welcome_name: String = "welcom
 	welcome_screen.reset_connect_button()
 	settings_controller.apply_passthrough(settings.passthrough_enabled)
 	welcome_screen.update_welcome_info()
-	stream_manager.resize_stream_viewport(1920, 1080)
+	if not preserve_browser: stream_manager.resize_stream_viewport(1920, 1080)
 
 func _clear_comp_yuv_textures():
 	comp.clear_yuv_textures()
@@ -1505,6 +1573,8 @@ func _ready():
 	_init_stream_backend()
 	if DevBridge.wanted():
 		add_child(DevBridge.new(self))
+	if EyeResolution.wanted():
+		add_child(EyeResolution.new(self))
 
 	var interface = XRServer.find_interface("OpenXR")
 	if not interface or not interface.is_initialized():
@@ -1579,6 +1649,7 @@ func _init_modules():
 	screen_sources = ScreenSources.new(self)
 	screen_sources.changed.connect(ui_controller.update_screen_sources)
 	screen_manager = ScreenManager.new(self)
+	placement_grid = ScreenPlacementController.new(self)
 	settings_controller = SettingsController.new(self)
 	state_manager = StateManager.new(self)
 	controller_mapper = ControllerMapper.new(self)
@@ -1790,16 +1861,22 @@ func _cell_transform_from_screens(gx: int, gy: int, anchor_gx: int, anchor_gy: i
 
 	return t
 
-# Single-cell convenience wrapper around _cell_transform_from_screens() - fine
-# for the one-off calls (preset apply, default placement); the live-drag hot
-# path below builds one shared cache instead of using this per candidate.
+# Grid slot (gx, gy) relative to the primary's slot. The Original layout uses
+# the slot transforms above; cylinder and sphere grids map slots onto their
+# surface, and the caller's adhere() lays the screen on it.
 func grid_cell_transform(gx: int, gy: int, anchor_gx: int, anchor_gy: int) -> Transform3D:
-	var n = absi((gx - anchor_gx) / MonitorGrid.SPAN)
-	return _cell_transform_from_screens(gx, gy, anchor_gx, anchor_gy, _grid_screen_transforms(n))
+	if placement_grid == null: placement_grid = ScreenPlacementController.new(self)
+	if not ScreenPlacementGrid.single_surface(placement_grid.shape()):
+		var n = absi((gx - anchor_gx) / MonitorGrid.SPAN)
+		return _cell_transform_from_screens(gx, gy, anchor_gx, anchor_gy, _grid_screen_transforms(n))
+	var step := settings.placement_grid_spacing
+	var horizontal := ceilf((primary_screen.mesh_size.x + SCREEN_GAP) / step) * step
+	var vertical := ceilf((primary_screen.mesh_size.y + SCREEN_GAP) / step) * step
+	var point := Vector3(float(gx - anchor_gx) / MonitorGrid.SPAN * horizontal,
+		-float(gy - anchor_gy) / MonitorGrid.SPAN * vertical, 0)
+	return placement_grid.anchor() * placement_grid.from_grid(point)
 
-# Nearest unoccupied SPANxSPAN cell to raw_pos. Brute-forces all
-# (COLS-SPAN+1)*(ROWS-SPAN+1) = 21 candidate cells against a single shared
-# transform cache - cheap enough to run every frame during a live drag.
+# Nearest unoccupied SPANxSPAN cell to raw_pos (Original layout live snapping).
 # occupied is an Array[Vector2i] of other screens' current grid cells.
 # Returns Vector2i(-1,-1) if every cell is blocked.
 func nearest_free_grid_cell(raw_pos: Vector3, occupied: Array, anchor_gx: int, anchor_gy: int) -> Vector2i:
@@ -1936,9 +2013,9 @@ func add_screen(monitor_id: StringName, real_x_hint: float = INF, with_stereo: b
 		_log("[COMP] Screen %s cylinder not natively supported, falling back to mesh rendering for this screen" % String(monitor_id))
 	return s
 
-func remove_screen(monitor_id: StringName) -> void:
+func remove_screen(monitor_id: StringName, target: VRScreen = null) -> void:
 	for i in range(screens.size()):
-		if screens[i].monitor_id == monitor_id:
+		if screens[i].monitor_id == monitor_id and (target == null or screens[i] == target):
 			var s = screens[i]
 			if s == primary_screen:
 				_log("[SCREEN] Refusing to remove the primary screen %s" % String(monitor_id))
@@ -1954,6 +2031,7 @@ func remove_screen(monitor_id: StringName) -> void:
 					retired_controls.append(layer)
 					layer.visible = false
 					layer.set_layer_viewport(null)
+					SphereLayers.release(layer)
 					layer.queue_free()
 			var retired_viewports: Array = []
 			for viewport in [s.comp_grab_bar_viewport, s.comp_corner_viewport]:
@@ -1964,16 +2042,19 @@ func remove_screen(monitor_id: StringName) -> void:
 				if s.comp_cylinder:
 					s.comp_cylinder.visible = false
 					s.comp_cylinder.set_layer_viewport(null)
+					SphereLayers.release(s.comp_cylinder)
 					xr_origin.remove_child(s.comp_cylinder)
 					s.comp_cylinder.queue_free()
 				if s.comp_cylinder_left:
 					s.comp_cylinder_left.visible = false
 					s.comp_cylinder_left.set_layer_viewport(null)
+					SphereLayers.release(s.comp_cylinder_left)
 					xr_origin.remove_child(s.comp_cylinder_left)
 					s.comp_cylinder_left.queue_free()
 				if s.comp_cylinder_right:
 					s.comp_cylinder_right.visible = false
 					s.comp_cylinder_right.set_layer_viewport(null)
+					SphereLayers.release(s.comp_cylinder_right)
 					xr_origin.remove_child(s.comp_cylinder_right)
 					s.comp_cylinder_right.queue_free()
 				if s.comp_viewport:
@@ -2135,7 +2216,15 @@ func _init_xr(interface):
 	_xr_render_width = int(render_size.x)
 	_log("[XR] OpenXR render target: %dx%d" % [render_size.x, render_size.y])
 	_log("[XR] Blend modes: %s" % str(interface.get_supported_environment_blend_modes()))
-	if OS.get_name() == "Android" and RenderingServer.get_current_rendering_method() == "gl_compatibility" and interface.has_method("set_submit_projection_layer"):
+	# Projectionless mode needs the patched engine (patches/godot-4.7-projectionless*.patch),
+	# which adds set_submit_projection_layer(). Linux (e.g. a Steam Frame) runs it on the
+	# Vulkan renderer too: the screens, menus and pointers are composition layers there
+	# as well, and skipping the eye buffers frees GPU time. --nf-projection keeps them.
+	# Linux arm64 only (standalone headsets): desktop Linux keeps its eye buffers, which
+	# some 3D content and the xr check's eye pictures rely on.
+	var projectionless_platform: bool = (OS.get_name() == "Android" and RenderingServer.get_current_rendering_method() == "gl_compatibility") \
+		or (OS.get_name() == "Linux" and Engine.get_architecture_name() == "arm64" and not "--nf-projection" in OS.get_cmdline_user_args())
+	if projectionless_platform and interface.has_method("set_submit_projection_layer"):
 		interface.set_submit_projection_layer(false)
 		_log("[XR] Projectionless mode enabled; submitting composition layers only")
 
@@ -2613,6 +2702,18 @@ func _apply_hand_rest(side: String, resting: bool):
 		xr_interaction._active_hand = side
 	_log("[HAND] %s controller %s" % [side, "resting (disabled)" if resting else "picked up (re-enabled)"])
 
+var _steamvr_runtime := -1
+
+func _xr_runtime_is_steamvr() -> bool:
+	if _steamvr_runtime < 0:
+		var interface = XRServer.find_interface("OpenXR")
+		if interface == null or not interface.is_initialized():
+			return false
+		var info: Dictionary = interface.get_system_info()
+		_steamvr_runtime = 1 if str(info.get("XRRuntimeName", "")).to_lower().contains("steamvr") else 0
+		_log("[XR] Runtime %s (SteamVR controller ownership: %s)" % [str(info.get("XRRuntimeName", "?")), _steamvr_runtime == 1])
+	return _steamvr_runtime == 1
+
 func _process_hand_tracking(_delta):
 	var hands_active = get_is_hand_tracking() and get_hand_tracking_has_data()
 	# Aim trackers exist throughout the session, including controller use.
@@ -2621,6 +2722,17 @@ func _process_hand_tracking(_delta):
 		if controller and (controller.get_float("trigger") > 0.1 or controller.get_float("grip") > 0.1
 				or controller.is_button_pressed("ax_button") or controller.is_button_pressed("by_button")):
 			hands_active = false
+	# SteamVR (Steam Frame) keeps reporting XR_EXT_hand_tracking joints while
+	# the controllers are held: the skeleton is derived from the controller.
+	# On Quest hand data stops when a controller is picked up, so that case
+	# never arose. On SteamVR a tracked controller owns the pointers. Limited
+	# to SteamVR so Quest multimodal (hands with controllers set down but still
+	# tracked) is unchanged; XR_EXT_hand_tracking_data_source would be the
+	# general fix.
+	if _xr_runtime_is_steamvr():
+		for controller in [right_hand, left_hand]:
+			if controller and controller.get_has_tracking_data():
+				hands_active = false
 	if hands_active != _is_using_hands:
 		xr_interaction.cancel_transient_interactions("hand/controller ownership changed")
 		_log("[HAND] ownership=%s runtime_aim=%s tracking_mode=%d" % ["hands" if hands_active else "controllers", xr_interaction.hand_aim_available(), settings.tracking_mode])
@@ -2806,6 +2918,8 @@ func _process_stats(delta):
 	var new_video_frame := stream_backend != null and stream_backend.consume_new_frame()
 	if video_presentation:
 		video_presentation.process_frame(new_video_frame)
+	if new_video_frame and stream_manager.monitor_first_frame_pending:
+		stream_manager.record_monitor_transition_stage("first_frame_submitted")
 	var frame_sample := telemetry.record_frame(delta, new_video_frame)
 	if not frame_sample.is_empty():
 		settings_controller.on_performance_sample(frame_sample)
@@ -2941,6 +3055,8 @@ func _process_idle_timeout():
 		# the welcome/composition state.
 
 func _notification(what):
+	if DevBridge.wanted() and what in [NOTIFICATION_APPLICATION_PAUSED, NOTIFICATION_APPLICATION_RESUMED, NOTIFICATION_APPLICATION_FOCUS_IN, NOTIFICATION_APPLICATION_FOCUS_OUT]:
+		_log("[PAD-SYSTEM] t=%d application_notification=%d" % [Time.get_ticks_msec(),what])
 	if what == NOTIFICATION_WM_CLOSE_REQUEST:
 		if welcome_screen: welcome_screen.cancel_xr_control()
 		if browser_prototype:
@@ -2948,6 +3064,7 @@ func _notification(what):
 		state_manager.save_state()
 		video_presentation.shutdown()
 	elif what == NOTIFICATION_APPLICATION_PAUSED:
+		if clipboard_sharing: clipboard_sharing.cancel()
 		# Keep Meteor's owned game/transport alive during headset handoffs.
 		var preparing_xr := welcome_screen != null and welcome_screen.retains_xr_lease_during_timing_transition()
 		if not pcvr_test.meteor_mode and not pcvr_test.standby_active and not preparing_xr:
@@ -2985,6 +3102,8 @@ func _input(event):
 		_last_activity_time = Time.get_ticks_msec() / 1000.0
 
 func _toggle_ui():
+	if ui_visible and ui_controller:
+		ui_controller.close_settings_popup()
 	if pcvr_handover.menu_only and ui_visible:
 		pcvr_handover.close_pcvr_menu()
 		return

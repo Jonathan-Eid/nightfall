@@ -36,12 +36,24 @@ func save_host_state():
 			"size": [s.mesh_size.x, s.mesh_size.y],
 			"curvature": s.curvature,
 			"grid_mode": s.grid_mode,
+			"placement_grid_owned": s.has_meta(&"placement_grid_owned"),
+			"placement_radius": s.placement_radius,
+			"surface": s.surface,
+			"surface_lat": s.surface_lat,
+			"surface_y": s.surface_y,
+			"surface_straight": s.surface_straight,
+			"surface_on_cap": s.surface_on_cap,
+			"surface_inset": s.surface_inset,
 			"grid_pos": [s.grid_pos.x, s.grid_pos.y],
 		}
 	save.set_value(ip, "screen_placements", JSON.stringify(remembered_placements.values()))
 	save.save("user://host_state.cfg")
 
 func load_host_state(ip: String):
+	# The settings object is reused across hosts; dismiss callbacks captured for
+	# the previous host before replacing its values.
+	if main.get("ui_controller") != null and main.ui_controller.has_method("close_settings_popup"):
+		main.ui_controller.close_settings_popup()
 	if ip.is_empty():
 		return
 	var save = ConfigFile.new()
@@ -81,7 +93,11 @@ func load_host_state(ip: String):
 	main.host_resolution = main.compute_requested_resolution()
 	main.settings_controller.refresh_resolution_btn_label()
 	main.ui_controller.update_monitor_tab()
-	var bitrate_label = main.bitrate_labels[main.settings.host.bitrate_idx + 1] if main.settings.host.bitrate_idx >= 0 else "Auto"
+	main.ui_controller.update_option_btn(main._ui_grip_scroll_btn, "On" if main.settings.grip_scroll_enabled else "Off")
+	main.ui_controller.update_option_btn(main._ui_extended_bitrate_btn, "On" if main.settings.extended_bitrate_limits else "Off")
+	main.settings_controller.normalize_desktop_encoding()
+	main.ui_controller.update_codec_btn()
+	var bitrate_label = main.settings_controller.bitrate_label()
 	main.ui_controller.update_option_btn(main._ui_bitrate_btn, bitrate_label)
 	main.settings_controller.apply_stereo()
 	if main.depth_estimator:
@@ -121,6 +137,11 @@ func load_host_state(ip: String):
 						s.rotation = Vector3(rot[0], rot[1], rot[2])
 						s.mesh_size = Vector2(size[0], size[1])
 						s.curvature = entry.get("curvature", s.curvature)
+						s.placement_radius = maxf(float(entry.get("placement_radius", 0.0)), 0.0)
+						s.surface = int(entry.get("surface", 0))
+						s.surface_lat = float(entry.get("surface_lat", 0.0))
+						_restore_band(s, entry)
+						if entry.get("placement_grid_owned", false): s.set_meta(&"placement_grid_owned", true)
 						s.grid_mode = entry.get("grid_mode", s.grid_mode)
 						var gp = entry.get("grid_pos", [s.grid_pos.x, s.grid_pos.y])
 						s.grid_pos = Vector2i(gp[0], gp[1])
@@ -147,6 +168,9 @@ func load_host_state(ip: String):
 			main.welcome_screen.show_welcome_screen(main._welcome_screen)
 
 func sync_ui_to_settings(apply_runtime: bool = true):
+	if main.ui_controller:
+		main.ui_controller.update_option_btn(main._ui_grip_scroll_btn, "On" if main.settings.grip_scroll_enabled else "Off")
+		main.ui_controller.update_option_btn(main._ui_extended_bitrate_btn, "On" if main.settings.extended_bitrate_limits else "Off")
 	# Opening the menu only needs fresh labels. Reapplying shaders, ambient
 	# sources, and bezel geometry while a native/legacy viewport is live can
 	# disturb the GLES render targets without any setting having changed.
@@ -175,6 +199,7 @@ func sync_ui_to_settings(apply_runtime: bool = true):
 		main.ui_controller.update_option_btn(main._ui_host_background_btn, "On" if main.settings.screen_host_background else "Off")
 		main.ui_controller.update_option_btn(main._ui_key_btn, ScreenImageOptions.KEY_LABELS[main.settings.screen_key_mode])
 		main.ui_controller.update_option_btn(main._ui_key_tolerance_btn, ScreenImageOptions.TOLERANCE_LABELS[main.settings.screen_key_tolerance])
+		main.ui_controller.update_option_btn(main._ui_crt_btn, ScreenImageOptions.CRT_LABELS[main.settings.screen_crt_mode])
 		main.ui_controller.update_option_btn(main._ui_high_refresh_btn, "On" if main.settings.high_refresh_rates else "Off")
 		main.ui_controller.update_option_btn(main._ui_pt_fade_btn, PassthroughFade.label(main.settings.passthrough_fade_pct))
 		if main._ui_quick_start_btn:
@@ -189,6 +214,8 @@ func sync_ui_to_settings(apply_runtime: bool = true):
 			main.ui_controller.update_option_btn(main._ui_microphone_btn, "On" if main.settings.microphone_enabled else "Off")
 		if main._ui_usb_link_btn:
 			main.ui_controller.update_option_btn(main._ui_usb_link_btn, "On" if main.settings.usb_link_enabled else "Off")
+		if main._ui_multipath_btn:
+			main.ui_controller.update_option_btn(main._ui_multipath_btn, "Auto" if main.settings.multipath_enabled else "Off")
 		var idle_idx = main.settings_controller.idle_values.find(main.settings.idle_timeout_min)
 		if idle_idx < 0: idle_idx = 0
 		main.ui_controller.update_option_btn(main._ui_idle_btn, main.settings_controller.idle_labels[idle_idx])
@@ -256,7 +283,7 @@ func restore_placement(s: VRScreen) -> bool:
 	if not entry is Dictionary or primary == null or s == primary:
 		return false
 	var size = entry.get("size", [s.mesh_size.x, s.mesh_size.y])
-	if entry.get("grid_mode", true):
+	if entry.get("grid_mode", true) and not entry.get("placement_grid_owned", false):
 		var gp = entry.get("grid_pos", [-1, -1])
 		var cell := Vector2i(int(gp[0]), int(gp[1]))
 		if cell.x < 0 or cell.y < 0 or not MonitorGrid.cell_in_bounds(cell.x, cell.y):
@@ -274,9 +301,32 @@ func restore_placement(s: VRScreen) -> bool:
 		var pos = entry.get("pos", [s.position.x, s.position.y, s.position.z])
 		var rot = entry.get("rot", [s.rotation.x, s.rotation.y, s.rotation.z])
 		s.mesh_size = Vector2(size[0], size[1])
-		s.grid_mode = false
+		s.grid_mode = entry.get("grid_mode", false)
+		if entry.get("placement_grid_owned", false): s.set_meta(&"placement_grid_owned", true)
 		s.position = Vector3(pos[0], pos[1], pos[2])
 		s.rotation = Vector3(rot[0], rot[1], rot[2])
 	s.curvature = entry.get("curvature", s.curvature)
+	s.placement_radius = maxf(float(entry.get("placement_radius", 0.0)), 0.0)
+	s.surface = int(entry.get("surface", 0))
+	s.surface_lat = float(entry.get("surface_lat", 0.0))
+	_restore_band(s, entry)
 	s.apply_curvature()
+	if s.grid_mode and not entry.get("placement_grid_owned", false) and main.get("placement_grid") != null:
+		main.placement_grid.adhere(s) # A legacy grid cell: lay it on the current surface.
 	return true
+
+## Placements saved before the capsule grid: a sphere screen's latitude was
+## its height over the radius.
+static func _restore_band(s: VRScreen, entry: Dictionary) -> void:
+	var legacy_sphere := s.surface == ScreenPlacementGrid.Shape.SPHERE and not entry.has("surface_on_cap")
+	s.surface_on_cap = bool(entry.get("surface_on_cap", legacy_sphere))
+	s.surface_straight = maxf(float(entry.get("surface_straight", 0.0)), 0.0)
+	var legacy_y := tan(s.surface_lat) * s.placement_radius if legacy_sphere else 0.0
+	s.surface_y = float(entry.get("surface_y", legacy_y))
+	if entry.has("surface_inset"):
+		s.surface_inset = float(entry.surface_inset)
+	else:
+		# Saved before Flat and Slight Curve screens became panels in front of
+		# the surface: the screen was saved at its place on the surface.
+		s.surface_inset = s.panel_inset_now()
+		if s.surface_inset != 0.0: s.transform = s.transform * Transform3D(Basis.IDENTITY, Vector3(0, 0, s.surface_inset))

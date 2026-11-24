@@ -25,9 +25,6 @@ foreach($file in 'meteor-windows-tracking.dll','meteor-windows-nvenc.dll') {
 CopyRequired "$target\windows-runtime-probe\Release\meteor-qsv.dll" $bin
 CopyRequired "$target\windows-openxr-loader-build\src\loader\Release\openxr_loader.dll" $bin
 CopyRequired "$target\windows-steamvr-build\Release\meteor-steamvr-mirror.exe" $bin
-$xrizer=Join-Path $runtime 'xr\xrizer\bin'
-New-Item -ItemType Directory -Force $xrizer | Out-Null
-CopyRequired "$target\windows-xrizer-d3d11-src\target\release\bin\vrclient_x64.dll" $xrizer
 $driver=Join-Path $runtime 'xr\steamvr\bin\win64'
 New-Item -ItemType Directory -Force $driver | Out-Null
 CopyRequired "$target\windows-steamvr-build\meteor\bin\win64\driver_meteor.dll" $driver
@@ -65,6 +62,12 @@ CopyRequired $brokerBuilt $vddDir
 # The driver script validates its whole package, the HDR Vulkan layer included, and does
 # nothing without it; run by the installer in best-effort mode that is a silent exit 0.
 CopyRequired "$vddSrc\vulkan-layer" $vddDir
+# The 32-bit layer (for WOW64 games) isn't in the repository: Vibepollo's packaging builds it
+# from libvirtualdisplay with an x86 toolchain. Build it the same way into
+# target\windows-vulkan-layer-x86 (see docs/plans/active/meteor-windows.md).
+$layerX86="$vddSrc\vulkan-layer\VkLayer_sunshine_hdr_x86.dll"
+if(-not (Test-Path $layerX86)){ $layerX86="$target\windows-vulkan-layer-x86\Release\VkLayer_sunshine_hdr_x86.dll" }
+CopyRequired $layerX86 (Join-Path $vddDir 'vulkan-layer')
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $vddDir 'install.ps1') -ValidateOnly -AllowUnsignedCatalogForValidation
 if($LASTEXITCODE -ne 0){ throw "The virtual display driver package is incomplete or invalid (install.ps1 -ValidateOnly exit $LASTEXITCODE)" }
 $manifest=@{file_format_version='1.0.0';runtime=@{name='Monado';library_path='.\bin\openxr_monado.dll'}}
@@ -78,7 +81,7 @@ $omp=@(Get-ChildItem "$vs\VC\Redist\MSVC\*\x64\Microsoft.VC*.OpenMP" -Directory 
 if(-not $crt.Count -or -not $omp.Count){throw 'Missing Visual Studio app-local CRT/OpenMP redistributables'}
 foreach($dir in @($crt[0].FullName,$omp[0].FullName)) {
     foreach($file in Get-ChildItem $dir -Filter '*.dll' -File) {
-        foreach($destination in @($Stage,$bin,$xrizer,$driver)) {CopyRequired $file.FullName $destination}
+        foreach($destination in @($Stage,$bin,$driver)) {CopyRequired $file.FullName $destination}
     }
 }
 CopyRequired (Join-Path $PSScriptRoot 'windows-release\Setup-Meteor.ps1') $Stage
@@ -94,7 +97,6 @@ CopyRequired (Join-Path $repo 'test\qsv\LICENSE') (Join-Path $licenses 'QSV-LICE
 CopyRequired (Join-Path $repo 'test\qsv\INTEL-LICENSE') (Join-Path $licenses 'oneVPL-LICENSE.txt')
 foreach($component in @(
     @{name='Monado';source="$target\windows-monado-src\LICENSE"},
-    @{name='xrizer';source="$target\windows-xrizer-d3d11-src\LICENSE"},
     @{name='Vibepollo';source="$target\windows-vibepollo-src\LICENSE"},
     @{name='Vibepollo-NOTICE';source="$target\windows-vibepollo-src\NOTICE"},
     @{name='OpenXR';source="$target\windows-openxr-sample\LICENSE"}
@@ -102,7 +104,7 @@ foreach($component in @(
 CopyRequired "$target\windows-monado-src\LICENSES" (Join-Path $licenses 'Monado')
 CopyRequired "$target\windows-openxr-sample\LICENSES" (Join-Path $licenses 'OpenXR')
 $patches=Join-Path $licenses 'patches';New-Item -ItemType Directory -Force $patches | Out-Null
-foreach($name in 'xrizer_windows_injection.patch','xrizer_windows_tests.patch','monado_windows_capture.patch','monado_windows_tracking.patch','monado_windows_controllers.patch','vibepollo_windows_multimonitor.patch') {
+foreach($name in 'monado_windows_capture.patch','monado_windows_tracking.patch','monado_windows_controllers.patch','vibepollo_windows_multimonitor.patch') {
     CopyRequired (Join-Path (Split-Path $meteor) "test\$name") $patches
 }
 foreach($port in 'cjson','pthreads','vulkan-loader') {
@@ -113,7 +115,7 @@ $files=@(Get-ChildItem $runtime -Recurse -File | Where-Object {$_.FullName -ne (
     @{path=$_.FullName.Substring($runtime.Length+1).Replace('\','/');bytes=$_.Length;sha256=(Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()}
 })
 $components=@{}
-foreach($name in 'windows-monado-src','windows-xrizer-d3d11-src','windows-vibepollo-src') {
+foreach($name in 'windows-monado-src','windows-vibepollo-src') {
     $components[$name]=(& git -C (Join-Path $target $name) rev-parse HEAD)
     if($LASTEXITCODE){throw "Missing source revision for $name"}
 }
